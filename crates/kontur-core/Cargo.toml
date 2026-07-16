@@ -1,0 +1,15 @@
+[package]
+name = "kontur-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+ciborium = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-big-array = "0.5"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
