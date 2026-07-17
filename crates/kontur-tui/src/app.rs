@@ -23,6 +23,13 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        // Restore the terminal on panic BEFORE the default hook prints, so the
+        // backtrace isn't swallowed by the alternate screen / raw mode.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            TerminalGuard::restore();
+            prev(info);
+        }));
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         Ok((TerminalGuard, terminal))
     }

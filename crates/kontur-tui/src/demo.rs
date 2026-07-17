@@ -112,10 +112,19 @@ pub async fn run(demo: Demo) -> std::io::Result<()> {
             Some(Action::Go) => {
                 let _ = demo.host().submit_verdict(&gid, demo.go_a(&gid, dh)).await;
                 log.push(LogLine { time: "12:11".into(), who: "you".into(), text: "go gate-001 · key sealed".into() });
-                // Scripted second key follows.
-                let _ = demo.host().submit_verdict(&gid, demo.go_b(&gid, dh)).await;
-                log.push(LogLine { time: "12:11".into(), who: "j.reed".into(), text: "go gate-001 · unanimous".into() });
-                closed = true;
+                // Scripted second key follows; only close on a real Satisfied resolution.
+                match demo.host().submit_verdict(&gid, demo.go_b(&gid, dh)).await {
+                    Ok(progress) if progress.state == kontur_core::HoldState::Satisfied => {
+                        log.push(LogLine { time: "12:11".into(), who: "j.reed".into(), text: "go gate-001 · unanimous".into() });
+                        closed = true;
+                    }
+                    Ok(_) => {
+                        log.push(LogLine { time: "12:11".into(), who: "kontur".into(), text: "gate not yet resolved".into() });
+                    }
+                    Err(_) => {
+                        log.push(LogLine { time: "12:11".into(), who: "kontur".into(), text: "second key rejected".into() });
+                    }
+                }
             }
             _ => {}
         }
