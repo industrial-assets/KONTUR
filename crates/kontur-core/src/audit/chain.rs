@@ -122,7 +122,7 @@ mod tests {
     use crate::ids::{GateId, TaskId};
     use crate::policy::Authorship;
     use crate::sign::{Ed25519Signer, FixedClock, Signer};
-    use crate::verdict::CastVerdict;
+    use crate::verdict::{CastVerdict, Remedy};
     use crate::{GatePolicy, ReviewDepth};
 
     fn record(prev: Hash, gate: &str) -> GateRecord {
@@ -199,5 +199,31 @@ mod tests {
         assert_eq!(signers.len(), 2);
         assert!(signers.contains(&Ed25519Signer::from_seed([1; 32]).operator_id()));
         assert!(signers.contains(&Ed25519Signer::from_seed([2; 32]).operator_id()));
+    }
+
+    #[test]
+    fn verify_chain_detects_broken_link() {
+        // Two individually-valid records, but the second points at the wrong prev.
+        let r1 = record(GENESIS, "g1");
+        let r2 = record(Hash([7u8; 32]), "g2"); // valid hash over its own core, wrong prev link
+        assert_eq!(verify_chain(&[r1, r2]).unwrap_err(), ChainBreak::BrokenLink(1));
+    }
+
+    #[test]
+    fn verify_chain_detects_tampered_checker_signature() {
+        // Flip a checker's verdict, then recompute this_hash so the hash check passes.
+        // The signature no longer matches the tampered content -> BadCheckerSignature.
+        let mut r = record(GENESIS, "g1");
+        r.core.checkers[0].verdict = Verdict::NoGo(Remedy::Steer("forged".into()));
+        r.this_hash = r.recompute_hash();
+        assert_eq!(
+            verify_chain(&[r]).unwrap_err(),
+            ChainBreak::BadCheckerSignature(0)
+        );
+    }
+
+    #[test]
+    fn verify_chain_accepts_empty() {
+        assert!(verify_chain(&[]).is_ok());
     }
 }
