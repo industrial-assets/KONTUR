@@ -88,6 +88,7 @@ impl DualHold {
     /// them), and the eligible pool is computed from the known operators. If
     /// that pool is smaller than the required keys, the hold reports
     /// `escalation_required` on the next cast (invariants #5, #7).
+    #[allow(clippy::too_many_arguments)]
     pub fn reopen_handedit(
         gate_id: GateId,
         task_id: TaskId,
@@ -215,11 +216,9 @@ impl DualHold {
         // In blind mode we defer any decision until all required verdicts are
         // in, so the second reviewer can never observe the first (not even
         // "it was a no-go"). In non-blind mode a no-go short-circuits.
-        if !self.policy.blind {
-            if self.verdicts.iter().any(|v| !v.raw().verdict.is_go()) {
-                self.block();
-                return;
-            }
+        if !self.policy.blind && self.verdicts.iter().any(|v| !v.raw().verdict.is_go()) {
+            self.block();
+            return;
         }
 
         if have < required {

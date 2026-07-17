@@ -24,5 +24,5 @@ pub use hold::{DualHold, HoldOutcome, HoldState};
 pub use ids::{GateId, HandEditRef, Hash, OperatorId, Sig, TaskId, Timestamp};
 pub use policy::{Authorship, Availability, GatePolicy, Independence, Outcome};
 pub use sealed::{SealedVerdict, VerdictStatus, VerdictView};
-pub use sign::{verify, Clock, Ed25519Signer, Signer};
+pub use sign::{verify, Clock, Ed25519Signer, FixedClock, Signer};
 pub use verdict::{CastVerdict, Remedy, ReviewDepth, SignedContent, Verdict};
