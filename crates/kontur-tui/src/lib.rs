@@ -6,6 +6,7 @@ pub mod input;
 pub mod viewmodel;
 pub mod render;
 pub mod app;
+pub mod demo;
 
 pub use view::{
     ActiveRegion, AgentCard, AuditSummary, Banner, GateCard, InterventionCard, KeyStatus, KeyView,
