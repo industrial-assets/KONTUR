@@ -3,6 +3,7 @@
 pub mod view;
 pub mod fleet;
 pub mod input;
+pub mod viewmodel;
 
 pub use view::{
     ActiveRegion, AgentCard, AuditSummary, Banner, GateCard, InterventionCard, KeyStatus, KeyView,
@@ -10,3 +11,4 @@ pub use view::{
 };
 pub use fleet::{FleetSource, MockFleet};
 pub use input::{map_key, Action};
+pub use viewmodel::build_session_view;
