@@ -86,6 +86,7 @@ struct Net {
     fleet: Vec<WireFleetCard>,
     log: VecDeque<String>,
     agent_done: bool,
+    finalizing: bool,
     started: Instant,
 }
 
@@ -157,6 +158,7 @@ impl SessionServer {
             fleet: vec![],
             log: VecDeque::new(),
             agent_done: false,
+            finalizing: false,
             started: Instant::now(),
         };
 
@@ -287,29 +289,28 @@ async fn reader_task<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
     };
 
     let (seat_idx, operator) = match &hello {
-        ClientMsg::Hello { seat, operator } => {
-            // Match by both seat label and operator identity
+        ClientMsg::Hello { seat: client_label, operator } => {
+            // Seat claim is keyed on OperatorId alone; the configured label
+            // for that seat is used everywhere (client-sent label is ignored
+            // beyond optional diagnostics).
             let mut found = None;
             let inner = &server.inner;
-            let net = inner.net.lock().await;
-            for (i, (label, op)) in inner.cfg.seats.iter().enumerate() {
-                if label == seat && op == operator {
+            for (i, (_label, op)) in inner.cfg.seats.iter().enumerate() {
+                if op == operator {
                     found = Some((i, *op));
                     break;
                 }
             }
-            drop(net);
-            match found {
-                Some(pair) => pair,
-                None => {
-                    let _ = conn_tx
-                        .send(ServerMsg::Rejected {
-                            reason: format!("unknown seat or operator: {seat}"),
-                        })
-                        .await;
-                    return;
-                }
+            if found.is_none() {
+                // Log the client-sent label for diagnostics only.
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: format!("unknown operator (client seat: {client_label})"),
+                    })
+                    .await;
+                return;
             }
+            found.unwrap()
         }
         _ => {
             let _ = conn_tx
@@ -511,12 +512,17 @@ impl SessionServer {
     async fn refresh_locked(&self) {
         let inner = &self.inner;
 
-        // Check if we need to finalize (before we build the wire state)
+        // Check if we need to finalize (before we build the wire state).
+        // Atomically claim the finalizing flag so concurrent refreshes
+        // cannot both enter finalize().
         let should_finalize = {
-            let net = inner.net.lock().await;
-            matches!(net.phase, Phase::Executing)
-                && net.agent_done
-                && !matches!(net.phase, Phase::Closed { .. })
+            let mut net = inner.net.lock().await;
+            if matches!(net.phase, Phase::Executing) && net.agent_done && !net.finalizing {
+                net.finalizing = true;
+                true
+            } else {
+                false
+            }
         };
 
         if should_finalize {
@@ -533,14 +539,6 @@ impl SessionServer {
 
     async fn finalize(&self) {
         let inner = &self.inner;
-
-        // Guard: already closed?
-        {
-            let net = inner.net.lock().await;
-            if matches!(net.phase, Phase::Closed { .. }) {
-                return;
-            }
-        }
 
         // Compose the merge message
         let merge_msg = {
@@ -1179,16 +1177,27 @@ mod tests {
         .await
         .unwrap();
 
-        // Brief wait — gate should still be present (Partial, not Satisfied)
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        {
-            let current = state_rx.borrow().clone();
-            // Should still be Executing (not Closed)
-            assert!(
-                !matches!(current.phase, WirePhase::Closed { .. }),
-                "gate should not close with only one key"
-            );
-        }
+        // A's cast triggers a refresh/broadcast. Await that next state
+        // deterministically and assert: still Executing AND the gate has
+        // exactly one key entry (A's, Sealed) — proving no resolution happened.
+        let after_a_cast = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                s.gate.as_ref().map(|g| !g.keys.is_empty()).unwrap_or(false)
+            }),
+        )
+        .await
+        .expect("timed out waiting for A's key to be recorded");
+
+        assert!(
+            !matches!(after_a_cast.phase, WirePhase::Closed { .. }),
+            "gate should not close with only one key"
+        );
+        assert_eq!(
+            after_a_cast.gate.as_ref().map(|g| g.keys.len()).unwrap_or(0),
+            1,
+            "exactly one key (A's, Sealed) should be recorded"
+        );
 
         // Reconnect B with a new duplex
         let (client_b2, server_b2) = tokio::io::duplex(65536);
@@ -1224,5 +1233,84 @@ mod tests {
         }))
         .await
         .expect("timed out waiting for Closed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 4: finalize_is_idempotent_under_concurrent_refresh (Fix 1 regression)
+    //
+    // After agent_done with no pending gates, calling agent_done (and thus
+    // refresh_locked) twice concurrently must result in the session closing
+    // exactly once — i.e. the log contains exactly one "session closed" entry.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn finalize_is_idempotent_under_concurrent_refresh() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, ws) = make_server(op1, op2, vec![]);
+        let mut state_rx = server.state_rx();
+
+        // Drive both seats through to Executing manually (no agent tasks).
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 })
+            .await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Trigger two concurrent agent_done calls. The finalizing flag must
+        // ensure only one of them proceeds through finalize().
+        let s1 = server.clone();
+        let s2 = server.clone();
+        let (h1, h2) = tokio::join!(
+            tokio::spawn(async move { s1.agent_done().await }),
+            tokio::spawn(async move { s2.agent_done().await }),
+        );
+        h1.unwrap();
+        h2.unwrap();
+
+        // Wait for Closed.
+        let closed_state = tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Closed { .. })
+        })).await.expect("timed out waiting for Closed");
+
+        // The merge message must be present (finalize ran at least once).
+        assert!(ws.merged_message().is_some(), "merge message should be set");
+
+        // The log must contain exactly one "session closed" entry.
+        let closed_count = closed_state.log.iter().filter(|l| l.contains("session closed")).count();
+        assert_eq!(
+            closed_count, 1,
+            "expected exactly one 'session closed' log entry, got {closed_count}: {:?}",
+            closed_state.log
+        );
     }
 }
