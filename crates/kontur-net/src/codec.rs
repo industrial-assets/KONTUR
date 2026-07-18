@@ -34,6 +34,18 @@ mod tests {
     use crate::protocol::{ClientMsg, ServerMsg, WireState, WirePhase, WireSeat};
     use kontur_core::{OperatorId, GateId, Verdict, ReviewDepth, Timestamp, Sig, CastVerdict};
 
+    async fn roundtrip<T>(v: &T) -> T
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let (client, server) = tokio::io::duplex(4096);
+        let (_, mut w) = tokio::io::split(client);
+        let (r, _) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(r);
+        write_json(&mut w, v).await.unwrap();
+        read_json(&mut reader).await.unwrap().expect("one message")
+    }
+
     #[tokio::test]
     async fn roundtrip_client_hello() {
         let original = ClientMsg::Hello {
@@ -41,11 +53,7 @@ mod tests {
             operator: OperatorId([1; 32]),
         };
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -53,11 +61,7 @@ mod tests {
     async fn roundtrip_client_ready() {
         let original = ClientMsg::Ready;
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -76,11 +80,7 @@ mod tests {
             verdict: cast_verdict,
         };
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -91,11 +91,7 @@ mod tests {
             contents: "fn main() {}".to_string(),
         };
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -103,11 +99,7 @@ mod tests {
     async fn roundtrip_client_rotate() {
         let original = ClientMsg::Rotate;
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -115,11 +107,7 @@ mod tests {
     async fn roundtrip_client_bye() {
         let original = ClientMsg::Bye;
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ClientMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ClientMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -129,11 +117,7 @@ mod tests {
             seat: "A".to_string(),
         };
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ServerMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ServerMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -153,11 +137,7 @@ mod tests {
             gate: None,
         }));
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ServerMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ServerMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
     }
 
@@ -167,12 +147,28 @@ mod tests {
             reason: "invalid operator".to_string(),
         };
 
-        let json = serde_json::to_string(&original).unwrap();
-        let bytes = json.as_bytes();
-        let mut reader = bytes;
-        let mut buf_reader = BufReader::new(&mut reader);
-        let recovered: ServerMsg = read_json(&mut buf_reader).await.unwrap().unwrap();
+        let recovered: ServerMsg = roundtrip(&original).await;
         assert_eq!(original, recovered);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_multi_message() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (_, mut w) = tokio::io::split(client);
+        let (r, _) = tokio::io::split(server);
+        let mut reader = tokio::io::BufReader::new(r);
+
+        let msg1 = ClientMsg::Ready;
+        let msg2 = ClientMsg::Bye;
+
+        write_json(&mut w, &msg1).await.unwrap();
+        write_json(&mut w, &msg2).await.unwrap();
+
+        let back1: ClientMsg = read_json(&mut reader).await.unwrap().expect("first message");
+        let back2: ClientMsg = read_json(&mut reader).await.unwrap().expect("second message");
+
+        assert_eq!(msg1, back1);
+        assert_eq!(msg2, back2);
     }
 
     #[tokio::test]
