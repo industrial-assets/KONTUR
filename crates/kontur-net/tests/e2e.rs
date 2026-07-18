@@ -84,23 +84,62 @@ fn git_commit_count(repo: &PathBuf) -> usize {
 // Helpers: advance to state matching predicate via mpsc
 // ---------------------------------------------------------------------------
 
-async fn next_state_matching<F>(
-    rx: &mut tokio::sync::mpsc::Receiver<kontur_net::ServerMsg>,
-    pred: F,
-) -> kontur_net::WireState
-where
-    F: Fn(&kontur_net::WireState) -> bool,
-{
-    loop {
-        // Generous: a green run never waits this long; it only bounds failure
-        // time. 10s flaked once on a cold post-rebuild run.
-        let msg = tokio::time::timeout(Duration::from_secs(55), rx.recv())
-            .await
-            .expect("timed out waiting for state message")
-            .expect("channel closed unexpectedly");
-        if let kontur_net::ServerMsg::State(ws) = msg {
-            if pred(&ws) {
-                return *ws;
+/// A cursor over the client's message stream that re-tests the last-seen
+/// state before reading fresh messages.
+///
+/// The server broadcasts via a `watch` channel, so a lagging connection
+/// receives a CONFLATED latest-state, and one state can satisfy several
+/// consecutive predicates. A naive "read until match" consumes such a state
+/// and then waits forever for a message the (correctly) quiescent system will
+/// never send. Every await must therefore first check the cached state.
+struct StateCursor {
+    rx: tokio::sync::mpsc::Receiver<kontur_net::ServerMsg>,
+    last: Option<kontur_net::WireState>,
+}
+
+impl StateCursor {
+    fn new(rx: tokio::sync::mpsc::Receiver<kontur_net::ServerMsg>) -> Self {
+        StateCursor { rx, last: None }
+    }
+
+    async fn await_matching<F>(&mut self, label: &str, pred: F) -> kontur_net::WireState
+    where
+        F: Fn(&kontur_net::WireState) -> bool,
+    {
+        // Re-test the conflated last state first.
+        if let Some(ws) = &self.last {
+            if pred(ws) {
+                return ws.clone();
+            }
+        }
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            // Generous: a green run never waits this long; it only bounds
+            // failure time.
+            let msg = tokio::time::timeout(Duration::from_secs(55), self.rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("[{label}] timed out waiting for state; saw: {seen:?}")
+                })
+                .expect("channel closed unexpectedly");
+            match msg {
+                kontur_net::ServerMsg::State(ws) => {
+                    let ws = *ws;
+                    let matched = pred(&ws);
+                    if !matched {
+                        seen.push(format!(
+                            "State(phase={:?}, gate={}, log_tail={:?})",
+                            std::mem::discriminant(&ws.phase),
+                            ws.gate.is_some(),
+                            ws.log.last()
+                        ));
+                    }
+                    self.last = Some(ws.clone());
+                    if matched {
+                        return ws;
+                    }
+                }
+                other => seen.push(format!("{other:?}")),
             }
         }
     }
@@ -176,24 +215,27 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         // --- 4. Two clients connect via TCP ------------------------------------
         let addr_str = op_addr.to_string();
 
-        let (client_a, mut rx_a) =
+        let (client_a, rx_a) =
             SessionClient::connect_tcp(&addr_str, "A".into(), seed_a)
                 .await
                 .expect("client A connect failed");
 
-        let (client_b, mut rx_b) =
+        let (client_b, rx_b) =
             SessionClient::connect_tcp(&addr_str, "B".into(), seed_b)
                 .await
                 .expect("client B connect failed");
 
+        let mut cur_a = StateCursor::new(rx_a);
+        let mut cur_b = StateCursor::new(rx_b);
+
         // --- 5. Step through protocol ------------------------------------------
 
         // Both connected → wait for DispatchReady.
-        next_state_matching(&mut rx_a, |s| {
+        cur_a.await_matching("A:dispatch-ready", |s| {
             matches!(s.phase, WirePhase::DispatchReady { .. })
         })
         .await;
-        next_state_matching(&mut rx_b, |s| {
+        cur_b.await_matching("B:dispatch-ready", |s| {
             matches!(s.phase, WirePhase::DispatchReady { .. })
         })
         .await;
@@ -202,11 +244,11 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         client_a.ready().await.unwrap();
         client_b.ready().await.unwrap();
 
-        next_state_matching(&mut rx_a, |s| {
+        cur_a.await_matching("A:plan-review", |s| {
             matches!(s.phase, WirePhase::PlanReview { .. })
         })
         .await;
-        next_state_matching(&mut rx_b, |s| {
+        cur_b.await_matching("B:plan-review", |s| {
             matches!(s.phase, WirePhase::PlanReview { .. })
         })
         .await;
@@ -215,18 +257,18 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         client_a.ready().await.unwrap();
         client_b.ready().await.unwrap();
 
-        next_state_matching(&mut rx_a, |s| matches!(s.phase, WirePhase::Executing)).await;
-        next_state_matching(&mut rx_b, |s| matches!(s.phase, WirePhase::Executing)).await;
+        cur_a.await_matching("A:executing", |s| matches!(s.phase, WirePhase::Executing)).await;
+        cur_b.await_matching("B:executing", |s| matches!(s.phase, WirePhase::Executing)).await;
 
         // --- 6. Wait for a gate ------------------------------------------------
         let state_with_gate =
-            next_state_matching(&mut rx_a, |s| s.gate.is_some()).await;
+            cur_a.await_matching("A:gate-appears", |s| s.gate.is_some()).await;
         let wire_gate = state_with_gate.gate.unwrap();
 
         // --- 7. A casts go; assert B sees A's key as Sealed --------------------
         client_a.cast_go(&wire_gate).await.unwrap();
 
-        let state_after_a = next_state_matching(&mut rx_b, |s| {
+        let state_after_a = cur_b.await_matching("B:sees-A-sealed", |s| {
             s.gate
                 .as_ref()
                 .map(|g| !g.keys.is_empty())
@@ -247,7 +289,7 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         let wire_gate_b = state_after_a.gate.unwrap();
         client_b.cast_go(&wire_gate_b).await.unwrap();
 
-        let closed_state = next_state_matching(&mut rx_a, |s| {
+        let closed_state = cur_a.await_matching("A:closed", |s| {
             matches!(s.phase, WirePhase::Closed { chain_verified: true, .. })
         })
         .await;

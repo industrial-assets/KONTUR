@@ -267,7 +267,9 @@ async fn writer_task<W: AsyncWrite + Unpin>(
                             break;
                         }
                     }
-                    None => break,
+                    None => {
+                        break;
+                    }
                 }
             }
         }
@@ -398,7 +400,11 @@ async fn handle_client_msg(
                         push_log(&mut net, "plan approved · executing");
                         let plan_tx = server.inner.plan_tx.clone();
                         drop(net);
-                        let _ = plan_tx.send(true);
+                        // send_replace, NOT send: watch::Sender::send discards the
+                        // value when no receiver is subscribed yet, and the agent
+                        // task may not have subscribed under scheduler load — the
+                        // approval would be lost and the agent would wait forever.
+                        let _ = plan_tx.send_replace(true);
                         server.refresh_locked().await;
                         return;
                     }
