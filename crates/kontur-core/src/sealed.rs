@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::ids::OperatorId;
 use crate::verdict::{CastVerdict, Verdict};
 
@@ -58,14 +60,16 @@ impl SealedVerdict {
 }
 
 /// What an external observer is permitted to see about a cast verdict.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum VerdictStatus {
     Sealed,
     Revealed(Verdict),
 }
 
-/// A projection of a cast verdict safe to show/log.
-#[derive(Clone, PartialEq, Eq, Debug)]
+/// A projection of a cast verdict safe to show/log. Safe to serialize —
+/// `Sealed` is data-free by construction, so the verdict value is never
+/// present in the wire form while the hold is sealed.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct VerdictView {
     pub operator: OperatorId,
     pub status: VerdictStatus,
@@ -140,5 +144,15 @@ mod tests {
         assert!(cv.verify_signature(&GateId("g1".into()), Hash([0u8; 32])));
         // Replaying onto a different gate fails.
         assert!(!cv.verify_signature(&GateId("g2".into()), Hash([0u8; 32])));
+    }
+
+    #[test]
+    fn sealed_view_serializes_without_verdict_value() {
+        let cv = a_cast(); // existing helper, a Go verdict
+        let sv = SealedVerdict::new(cv, true);
+        let json = serde_json::to_string(&sv.view()).unwrap();
+        assert!(json.contains("Sealed"));
+        assert!(!json.contains("Revealed"));
+        assert!(!json.contains("\"Go\""));
     }
 }

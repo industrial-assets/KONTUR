@@ -26,11 +26,14 @@ pub enum Authorship {
     Both,
 }
 
-/// How a satisfied gate resolved.
+/// How a resolved gate concluded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Outcome {
     Unanimous,
     ResolvedAfterDisagreement,
+    /// The gate resolved with a no-go; the dissenting checker entry carries the
+    /// remedy and its signature. The task routed to intervention.
+    Blocked,
 }
 
 /// The rules governing a single gate.

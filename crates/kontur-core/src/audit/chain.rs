@@ -120,9 +120,9 @@ mod tests {
     use crate::eligibility::MakerSet;
     use crate::hold::DualHold;
     use crate::ids::{GateId, TaskId};
-    use crate::policy::Authorship;
+    use crate::policy::{Authorship, Outcome};
     use crate::sign::{Ed25519Signer, FixedClock, Signer};
-    use crate::verdict::{CastVerdict, Remedy};
+    use crate::verdict::{CastVerdict, Remedy, Verdict};
     use crate::{GatePolicy, ReviewDepth};
 
     fn record(prev: Hash, gate: &str) -> GateRecord {
@@ -225,5 +225,43 @@ mod tests {
     #[test]
     fn verify_chain_accepts_empty() {
         assert!(verify_chain(&[]).is_ok());
+    }
+
+    #[test]
+    fn chain_with_blocked_record_verifies_and_detects_tamper() {
+        let mut chain = AuditChain::new();
+        chain.append(record(GENESIS, "g1")).unwrap();
+        // blocked record chained after the satisfied one
+        let h = {
+            let mut h = DualHold::new(GateId("g2".into()), TaskId("t2".into()), Hash([9u8; 32]),
+                GatePolicy::default(), MakerSet::new(), Authorship::Agent);
+            for (seed, v) in [(1u8, Verdict::Go),
+                (2u8, Verdict::NoGo(crate::Remedy::Steer("fix".into())))] {
+                let s = Ed25519Signer::from_seed([seed; 32]);
+                let cv = CastVerdict::create(&s, &FixedClock(1000 + seed as i64), h.gate_id(),
+                    h.diff_hash(), v, ReviewDepth::FullDiff, None);
+                let ev = h.version();
+                h.cast(ev, cv).unwrap();
+            }
+            h
+        };
+        let prov = Provenance {
+            task_id: TaskId("t2".into()),
+            prompt: "p".into(),
+            prompt_author: Ed25519Signer::from_seed([1; 32]).operator_id(),
+            agent_id: "a".into(),
+            agent_model: "m".into(),
+            agent_version: "v".into(),
+            diff_hash: Hash([9u8; 32]),
+            files: vec!["f".into()],
+            loc: 1,
+            tokens: 1,
+        };
+        let rec = GateRecord::build(chain.head(), prov, &h).unwrap();
+        chain.append(rec).unwrap();
+        assert!(verify_chain(chain.records()).is_ok());
+        let mut tampered = chain.records().to_vec();
+        tampered[1].core.outcome = Outcome::Unanimous; // lie about the outcome
+        assert!(verify_chain(&tampered).is_err());
     }
 }
