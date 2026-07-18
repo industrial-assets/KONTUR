@@ -308,16 +308,22 @@ pub async fn run_remote(addr: &str, seat: String, seed: [u8; 32]) -> io::Result<
             Some(Action::RemedySubmit) => {
                 match compose {
                     ComposeTarget::Remedy => {
-                        if let Some(wg) = &state.gate {
-                            let _ = client.cast_nogo(wg, &compose_buf).await;
+                        if compose_buf.trim().is_empty() {
+                            // no bare veto: keep composing until a real steer exists
+                        } else {
+                            if let Some(wg) = &state.gate {
+                                let _ = client.cast_nogo(wg, &compose_buf).await;
+                            }
+                            compose = ComposeTarget::None;
+                            compose_buf.clear();
                         }
-                        compose = ComposeTarget::None;
-                        compose_buf.clear();
                     }
                     ComposeTarget::HandEditPath => {
                         let path = compose_buf.clone();
-                        compose = ComposeTarget::HandEditContents { path };
-                        compose_buf.clear();
+                        if !path.trim().is_empty() {
+                            compose = ComposeTarget::HandEditContents { path };
+                            compose_buf.clear();
+                        }
                     }
                     ComposeTarget::HandEditContents { ref path } => {
                         let path = path.clone();

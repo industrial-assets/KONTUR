@@ -99,7 +99,7 @@ fn plan_region_renders_plan_gate_and_approve_key() {
         tasks: vec!["auth.rs".into(), "session.rs".into()],
         ready: [true, false],
     }));
-    assert!(s.contains("PLAN GATE") || s.contains("PLAN"));
+    assert!(s.contains("PLAN GATE"));
     assert!(s.contains("[y] approve plan"));
 }
 
