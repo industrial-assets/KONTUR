@@ -92,7 +92,9 @@ where
     F: Fn(&kontur_net::WireState) -> bool,
 {
     loop {
-        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        // Generous: a green run never waits this long; it only bounds failure
+        // time. 10s flaked once on a cold post-rebuild run.
+        let msg = tokio::time::timeout(Duration::from_secs(55), rx.recv())
             .await
             .expect("timed out waiting for state message")
             .expect("channel closed unexpectedly");
@@ -251,8 +253,11 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         .await;
 
         match &closed_state.phase {
-            WirePhase::Closed { chain_verified, .. } => {
+            WirePhase::Closed { chain_verified, merged, .. } => {
                 assert!(chain_verified, "audit chain must be verified after close");
+                // merged=true carries the actual merge_session result, so seeing
+                // it guarantees the git merge completed before we inspect below.
+                assert!(merged, "session close must report a successful merge");
             }
             _ => panic!("expected Closed phase"),
         }
