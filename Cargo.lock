@@ -857,6 +857,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde-big-array",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
 ]
@@ -874,11 +875,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "kontur-net"
+version = "0.1.0"
+dependencies = [
+ "kontur-core",
+ "kontur-mcp",
+ "rmcp",
+ "serde",
+ "serde-big-array",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "kontur-tui"
 version = "0.1.0"
 dependencies = [
  "kontur-core",
  "kontur-mcp",
+ "kontur-net",
  "ratatui",
  "tokio",
 ]
@@ -1787,6 +1803,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
+name = "socket2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2014,8 +2040,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d988bcd52dbe076d3d46903332f58c912b87a2c49b1428419a5845154762ffee"
 dependencies = [
  "bytes",
+ "libc",
+ "mio",
  "pin-project-lite",
+ "signal-hook-registry",
+ "socket2",
  "tokio-macros",
+ "windows-sys",
 ]
 
 [[package]]

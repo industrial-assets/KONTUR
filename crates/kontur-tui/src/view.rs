@@ -95,11 +95,14 @@ pub struct AuditSummary {
     pub gates: usize,
     pub reviewers: Vec<String>,
     pub chain_verified: bool,
+    pub merged: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ActiveRegion {
     Idle,
+    Prompt { prompt: String, ready: [bool; 2] },
+    Plan { tasks: Vec<String>, ready: [bool; 2] },
     Gate(GateCard),
     Intervention(InterventionCard),
     SessionClosed(AuditSummary),

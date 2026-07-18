@@ -54,23 +54,27 @@ pub struct GateRecord {
 
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
 pub enum RecordError {
-    #[error("cannot record a gate that is not satisfied")]
-    HoldNotSatisfied,
+    #[error("cannot record an unresolved gate")]
+    HoldUnresolved,
 }
 
 impl GateRecord {
-    /// Build the record for a satisfied hold, chained to `prev_hash`. Only a
-    /// satisfied hold (two go verdicts) produces a merge record; blocked holds
-    /// route to intervention and are recorded by the caller separately.
+    /// Build the record for a resolved hold, chained to `prev_hash`. A hold is
+    /// resolved when it is either `Satisfied` (two go verdicts, merge path) or
+    /// `Blocked` (a no-go resolved it, intervention path). A blocked record's
+    /// checker entries already carry the `NoGo(Remedy)` verdict and its
+    /// signature — dissent and remedy are chained with no new fields. Open or
+    /// in-progress holds are rejected.
     pub fn build(
         prev_hash: Hash,
         provenance: Provenance,
         hold: &DualHold,
     ) -> Result<GateRecord, RecordError> {
-        if hold.state() != HoldState::Satisfied {
-            return Err(RecordError::HoldNotSatisfied);
-        }
-        let outcome = hold.outcome().expect("satisfied hold has an outcome");
+        let outcome = match hold.state() {
+            HoldState::Satisfied => hold.outcome().expect("satisfied hold has an outcome"),
+            HoldState::Blocked => Outcome::Blocked,
+            _ => return Err(RecordError::HoldUnresolved),
+        };
 
         let checkers: Vec<CheckerEntry> = hold
             .raw_verdicts()
@@ -178,6 +182,40 @@ mod tests {
             Authorship::Agent,
         );
         let err = GateRecord::build(Hash([0u8; 32]), provenance(), &h).unwrap_err();
-        assert_eq!(err, RecordError::HoldNotSatisfied);
+        assert_eq!(err, RecordError::HoldUnresolved);
+    }
+
+    fn blocked_hold() -> DualHold {
+        let mut h = DualHold::new(
+            GateId("g1".into()), TaskId("t1".into()), Hash([9u8; 32]),
+            GatePolicy::default(), MakerSet::new(), Authorship::Agent,
+        );
+        let s1 = Ed25519Signer::from_seed([1; 32]);
+        let cv = CastVerdict::create(&s1, &FixedClock(1000), h.gate_id(), h.diff_hash(),
+            Verdict::Go, ReviewDepth::FullDiff, None);
+        h.cast(0, cv).unwrap();
+        let s2 = Ed25519Signer::from_seed([2; 32]);
+        let cv = CastVerdict::create(&s2, &FixedClock(1001), h.gate_id(), h.diff_hash(),
+            Verdict::NoGo(crate::Remedy::Steer("cache it".into())), ReviewDepth::FullDiff, None);
+        h.cast(1, cv).unwrap();
+        h
+    }
+
+    #[test]
+    fn blocked_hold_builds_record_with_remedy_and_outcome() {
+        let h = blocked_hold();
+        let rec = GateRecord::build(Hash([0u8; 32]), provenance(), &h).unwrap();
+        assert_eq!(rec.core.outcome, Outcome::Blocked);
+        assert!(rec.core.checkers.iter().any(|c| matches!(
+            &c.verdict, Verdict::NoGo(crate::Remedy::Steer(s)) if s == "cache it")));
+        assert_eq!(rec.this_hash, rec.recompute_hash());
+    }
+
+    #[test]
+    fn open_hold_still_refused() {
+        let h = DualHold::new(GateId("g2".into()), TaskId("t2".into()), Hash([1u8; 32]),
+            GatePolicy::default(), MakerSet::new(), Authorship::Agent);
+        assert_eq!(GateRecord::build(Hash([0u8; 32]), provenance(), &h).unwrap_err(),
+            RecordError::HoldUnresolved);
     }
 }

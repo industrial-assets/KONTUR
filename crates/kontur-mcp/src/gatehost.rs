@@ -135,10 +135,14 @@ impl GateHost {
                 None
             }
             HoldState::Blocked => {
-                let (task_id, remedy) = {
+                let prev = st.chain.head();
+                let (task_id, remedy, record) = {
                     let e = &st.holds[idx];
-                    (e.hold.task_id().clone(), e.hold.blocking_remedy())
+                    let rec = GateRecord::build(prev, e.provenance.clone(), &e.hold)
+                        .expect("a resolved hold always builds a record");
+                    (e.hold.task_id().clone(), e.hold.blocking_remedy(), rec)
                 };
+                st.chain.append(record).expect("chain head matches prev by construction");
                 self.workspace.discard_task(&task_id)?;
                 remedy
             }
@@ -266,6 +270,16 @@ impl GateHost {
     pub async fn audit_len(&self) -> usize {
         self.state.lock().await.chain.records().len()
     }
+
+    /// Session-end: land the approved work as one reviewed commit.
+    pub async fn merge_session(&self, message: &str) -> Result<(), GateHostError> {
+        Ok(self.workspace.merge_session(message)?)
+    }
+
+    /// The session's operator roster (for composing Reviewed-by trailers).
+    pub async fn session_operators(&self) -> Vec<OperatorId> {
+        self.state.lock().await.ctx.operators.clone()
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +359,8 @@ mod tests {
         assert_eq!(p2.remedy, Some(kontur_core::Remedy::Steer("cache it".into())));
         assert!(ws.accepted_tasks().is_empty());
         assert_eq!(ws.discarded_tasks(), vec![TaskId("t1".into())]);
+        assert_eq!(host.audit_len().await, 1);
+        assert!(host.verify_audit().await.is_ok());
     }
 
     #[tokio::test]
@@ -464,5 +480,46 @@ mod tests {
         host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
         host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap();
         assert_eq!(host.audit_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn merge_session_after_satisfied_gate_records_message() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+        host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap();
+
+        host.merge_session("m").await.unwrap();
+        assert_eq!(ws.merged_message(), Some("m".to_string()));
+    }
+
+    #[tokio::test]
+    async fn blocked_then_reworked_satisfied_chains_two_records() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+        host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        host.submit_verdict(&gid, nogo_verdict(2, &gid, dh, "cache it")).await.unwrap();
+        assert_eq!(host.audit_len().await, 1);
+
+        // Rework: new write, fresh gate, both go.
+        let task = TaskId("t1".into());
+        ws.apply_write(&task, "a.rs", b"reworked\n").unwrap();
+        let (gid2, _rx) = host.begin_task_gate(task, 0).await.unwrap();
+        let dh2 = host.pending_gates().await[0].diff_hash;
+        host.submit_verdict(&gid2, go_verdict(1, &gid2, dh2)).await.unwrap();
+        host.submit_verdict(&gid2, go_verdict(2, &gid2, dh2)).await.unwrap();
+
+        assert_eq!(host.audit_len().await, 2);
+        assert!(host.verify_audit().await.is_ok());
     }
 }
