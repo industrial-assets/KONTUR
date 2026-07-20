@@ -21,6 +21,7 @@ pub enum HostEvent {
     GateOpened { gate_id: GateId, task: TaskId },
     GateResolved { gate_id: GateId, state: HoldState },
     PlanProposed { tasks: Vec<String> },
+    SessionAbandoned,
 }
 
 /// Result of a cast on the operator face.
@@ -379,6 +380,25 @@ impl GateHost {
         Ok(self.workspace.merge_session(message)?)
     }
 
+    /// Operator kill-switch: discard all pending (Open/Partial) tasks and emit
+    /// `SessionAbandoned`. Already-resolved gates keep their audit records.
+    /// Nothing is merged.
+    pub async fn abandon_session(&self) -> Result<(), GateHostError> {
+        let task_ids: Vec<TaskId> = {
+            let st = self.state.lock().await;
+            st.holds
+                .iter()
+                .filter(|e| matches!(e.hold.state(), HoldState::Open | HoldState::Partial))
+                .map(|e| e.hold.task_id().clone())
+                .collect()
+        };
+        for task_id in task_ids {
+            self.workspace.discard_task(&task_id)?;
+        }
+        let _ = self.events.send(HostEvent::SessionAbandoned);
+        Ok(())
+    }
+
     /// The session's operator roster (for composing Reviewed-by trailers).
     pub async fn session_operators(&self) -> Vec<OperatorId> {
         self.state.lock().await.ctx.operators.clone()
@@ -623,6 +643,77 @@ mod tests {
         host.submit_verdict(&gid2, go_verdict(2, &gid2, dh2)).await.unwrap();
 
         assert_eq!(host.audit_len().await, 2);
+        assert!(host.verify_audit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn abandon_session_discards_pending_and_emits_event() {
+        use tokio::sync::broadcast::error::TryRecvError;
+        use std::time::Duration;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        // Open a gate (task in Open/Partial state).
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+
+        // Cast one key → Partial state.
+        let p = host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        assert_eq!(p.state, HoldState::Partial);
+
+        let mut ev_rx = host.subscribe_events();
+
+        // Abandon: discards the pending task, emits SessionAbandoned.
+        host.abandon_session().await.unwrap();
+
+        // The pending task was discarded.
+        assert_eq!(ws.discarded_tasks(), vec![kontur_core::TaskId("t1".into())]);
+        // Nothing was accepted.
+        assert!(ws.accepted_tasks().is_empty());
+        // The audit chain is still valid (no records for this partial gate, so chain is empty-valid).
+        assert!(host.verify_audit().await.is_ok());
+
+        // SessionAbandoned event must have been emitted.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut got_abandoned = false;
+        loop {
+            match ev_rx.try_recv() {
+                Ok(HostEvent::SessionAbandoned) => { got_abandoned = true; break; }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline { break; }
+                    tokio::task::yield_now().await;
+                }
+                _ => break,
+            }
+        }
+        assert!(got_abandoned, "SessionAbandoned event must be emitted");
+    }
+
+    #[tokio::test]
+    async fn abandon_session_skips_satisfied_tasks() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        // Open and fully satisfy a gate (task becomes Satisfied/accepted).
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+        host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap();
+
+        assert_eq!(ws.accepted_tasks(), vec![kontur_core::TaskId("t1".into())]);
+        assert_eq!(host.audit_len().await, 1);
+
+        // Abandon: no pending tasks to discard, chain stays intact.
+        host.abandon_session().await.unwrap();
+
+        // No discards from abandon (already accepted earlier).
+        assert!(ws.discarded_tasks().is_empty());
         assert!(host.verify_audit().await.is_ok());
     }
 

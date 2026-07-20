@@ -215,27 +215,46 @@ fn active(frame: &mut Frame, area: Rect, view: &SessionView) {
             );
         }
         ActiveRegion::SessionClosed(summary) => {
-            let mut lines = vec![
-                Line::from(format!(" {} gates", summary.gates)),
-                Line::from(format!(" Reviewed-by: {}", summary.reviewers.join("   Reviewed-by: "))),
-                Line::from(if summary.chain_verified {
-                    " chain verified ✓ (tamper-evident)".to_string()
-                } else {
-                    " chain BROKEN ✗".to_string()
-                }),
-            ];
-            if summary.merged {
-                lines.push(Line::from(" merged to repo ✓"));
+            if summary.abandoned {
+                let lines = vec![
+                    Line::from(Span::styled(
+                        " SESSION ABANDONED — nothing merged (audit chain intact)",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(format!(" {} gates resolved before abandon", summary.gates)),
+                    Line::from(if summary.chain_verified {
+                        " chain verified ✓ (tamper-evident)".to_string()
+                    } else {
+                        " chain BROKEN ✗".to_string()
+                    }),
+                ];
+                frame.render_widget(
+                    Paragraph::new(lines).block(Block::bordered().title("SESSION ABANDONED")),
+                    area,
+                );
             } else {
-                lines.push(Line::from(Span::styled(
-                    " MERGE FAILED — work NOT landed in git (audit chain intact)",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
+                let mut lines = vec![
+                    Line::from(format!(" {} gates", summary.gates)),
+                    Line::from(format!(" Reviewed-by: {}", summary.reviewers.join("   Reviewed-by: "))),
+                    Line::from(if summary.chain_verified {
+                        " chain verified ✓ (tamper-evident)".to_string()
+                    } else {
+                        " chain BROKEN ✗".to_string()
+                    }),
+                ];
+                if summary.merged {
+                    lines.push(Line::from(" merged to repo ✓"));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        " MERGE FAILED — work NOT landed in git (audit chain intact)",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
+                frame.render_widget(
+                    Paragraph::new(lines).block(Block::bordered().title("SESSION COMPLETE")),
+                    area,
+                );
             }
-            frame.render_widget(
-                Paragraph::new(lines).block(Block::bordered().title("SESSION COMPLETE")),
-                area,
-            );
         }
     }
 }
@@ -291,6 +310,7 @@ mod tests {
             reviewers: vec!["A".into(), "B".into()],
             chain_verified: true,
             merged: false,
+            abandoned: false,
         }));
         terminal.draw(|f| render(f, &view)).unwrap();
         let rendered = terminal.backend().to_string();
@@ -304,6 +324,39 @@ mod tests {
         );
     }
 
+    /// When abandoned=true the render must show SESSION ABANDONED loudly and
+    /// must NOT show merged/Reviewed-by copy.
+    #[test]
+    fn session_abandoned_renders_loud() {
+        let backend = TestBackend::new(120, 25);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let view = minimal_view(ActiveRegion::SessionClosed(AuditSummary {
+            gates: 2,
+            reviewers: vec!["A".into(), "B".into()],
+            chain_verified: true,
+            merged: false,
+            abandoned: true,
+        }));
+        terminal.draw(|f| render(f, &view)).unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("SESSION ABANDONED"),
+            "expected 'SESSION ABANDONED' in rendered output; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("nothing merged"),
+            "expected 'nothing merged' in abandoned render; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("merged to repo"),
+            "must not show success copy when abandoned"
+        );
+        assert!(
+            !rendered.contains("Reviewed-by"),
+            "must not show Reviewed-by when abandoned"
+        );
+    }
+
     /// When merged=true the render must show the success line.
     #[test]
     fn session_closed_merge_ok_renders_success_line() {
@@ -314,6 +367,7 @@ mod tests {
             reviewers: vec!["A".into(), "B".into()],
             chain_verified: true,
             merged: true,
+            abandoned: false,
         }));
         terminal.draw(|f| render(f, &view)).unwrap();
         let rendered = terminal.backend().to_string();

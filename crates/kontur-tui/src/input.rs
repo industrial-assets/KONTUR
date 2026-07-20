@@ -12,6 +12,8 @@ pub enum Action {
     Ready,
     Help,
     Quit,
+    AbandonBegin,
+    AbandonConfirm,
     RemedyChar(char),
     RemedyBackspace,
     RemedySubmit,
@@ -42,6 +44,7 @@ pub fn map_key(code: KeyCode, composing_remedy: bool) -> Action {
         KeyCode::Char('y') => Action::Ready,
         KeyCode::Char('?') => Action::Help,
         KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('k') => Action::AbandonBegin,
         _ => Action::None,
     }
 }

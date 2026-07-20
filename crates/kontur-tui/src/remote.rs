@@ -27,6 +27,7 @@ enum ComposeTarget {
     Remedy,
     HandEditPath,
     HandEditContents { path: String },
+    ConfirmAbandon,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +141,13 @@ pub fn wire_to_view(state: &WireState, own: OperatorId) -> SessionView {
                 ActiveRegion::Idle
             }
         }
-        WirePhase::Closed { gates, chain_verified, reviewers, merged } => {
+        WirePhase::Closed { gates, chain_verified, reviewers, merged, abandoned } => {
             ActiveRegion::SessionClosed(AuditSummary {
                 gates: *gates,
                 chain_verified: *chain_verified,
                 reviewers: reviewers.clone(),
                 merged: *merged,
+                abandoned: *abandoned,
             })
         }
     };
@@ -369,6 +371,18 @@ pub async fn run_remote(
                 compose_buf.clear();
             }
 
+            // Abandon → request confirmation.
+            Some(Action::AbandonBegin) => {
+                compose = ComposeTarget::ConfirmAbandon;
+                compose_buf.clear();
+                rejected_msg = Some("abandon session? [y] confirm · [esc] cancel".into());
+                rejected_ttl = 60;
+            }
+
+            Some(Action::AbandonConfirm) => {
+                let _ = client.abandon().await;
+            }
+
             // Hand-edit → start path compose.
             Some(Action::HandEdit) => {
                 compose = ComposeTarget::HandEditPath;
@@ -395,7 +409,15 @@ pub async fn run_remote(
 
             // Composing text.
             Some(Action::RemedyChar(c)) => {
-                compose_buf.push(c);
+                if matches!(compose, ComposeTarget::ConfirmAbandon) {
+                    if c == 'y' {
+                        let _ = client.abandon().await;
+                    }
+                    compose = ComposeTarget::None;
+                    compose_buf.clear();
+                } else {
+                    compose_buf.push(c);
+                }
             }
             Some(Action::RemedyBackspace) => {
                 compose_buf.pop();
@@ -424,6 +446,11 @@ pub async fn run_remote(
                     ComposeTarget::HandEditContents { ref path } => {
                         let path = path.clone();
                         let _ = client.hand_edit(&path, &compose_buf).await;
+                        compose = ComposeTarget::None;
+                        compose_buf.clear();
+                    }
+                    ComposeTarget::ConfirmAbandon => {
+                        // Enter on confirm-abandon cancels (no bare confirm via Enter)
                         compose = ComposeTarget::None;
                         compose_buf.clear();
                     }
@@ -566,6 +593,7 @@ mod tests {
             chain_verified: true,
             reviewers: vec!["A".into(), "B".into()],
             merged: true,
+            abandoned: false,
         });
 
         let view = wire_to_view(&state, op(1));
@@ -575,6 +603,7 @@ mod tests {
                 assert!(summary.chain_verified);
                 assert_eq!(summary.reviewers, vec!["A".to_string(), "B".to_string()]);
                 assert!(summary.merged);
+                assert!(!summary.abandoned);
             }
             other => panic!("expected SessionClosed, got {:?}", other),
         }

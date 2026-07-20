@@ -34,6 +34,7 @@ pub async fn build_session_view(
             reviewers: stations.iter().map(|s| s.label.clone()).collect(),
             chain_verified: host.verify_audit().await.is_ok(),
             merged: true, // in-memory demo: acceptance is recorded; no git merge needed
+            abandoned: false,
         })
     } else if let Some(gv) = pending.first() {
         let diff_preview = host

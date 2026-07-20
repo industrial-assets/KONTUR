@@ -100,6 +100,7 @@ pub struct AuditSummary {
     pub reviewers: Vec<String>,
     pub chain_verified: bool,
     pub merged: bool,
+    pub abandoned: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

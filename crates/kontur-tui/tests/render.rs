@@ -76,7 +76,7 @@ fn gate_shows_summary_and_sealed_key_never_value() {
 
 #[test]
 fn session_close_shows_verified_chain() {
-    let summary = AuditSummary { gates: 4, reviewers: vec!["A · YOU".into(), "B · J.REED".into()], chain_verified: true, merged: true };
+    let summary = AuditSummary { gates: 4, reviewers: vec!["A · YOU".into(), "B · J.REED".into()], chain_verified: true, merged: true, abandoned: false };
     let s = draw(&base(ActiveRegion::SessionClosed(summary)));
     assert!(s.contains("4 gates"));
     assert!(!s.contains("unanimous"));
@@ -127,7 +127,7 @@ fn render_diff_contains_diff_text_and_close_hint() {
 
 #[test]
 fn session_close_no_longer_says_unanimous() {
-    let summary = AuditSummary { gates: 4, reviewers: vec!["A".into()], chain_verified: true, merged: true };
+    let summary = AuditSummary { gates: 4, reviewers: vec!["A".into()], chain_verified: true, merged: true, abandoned: false };
     let s = draw(&base(ActiveRegion::SessionClosed(summary)));
     assert!(s.contains("4 gates"));
     assert!(!s.contains("unanimous"));

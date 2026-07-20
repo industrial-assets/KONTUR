@@ -142,6 +142,10 @@ impl SessionClient {
         .await
     }
 
+    pub async fn abandon(&self) -> io::Result<()> {
+        self.send(ClientMsg::Abandon).await
+    }
+
     /// Sign a Go verdict against the gate described by `wire_gate` and send it.
     pub async fn cast_go(&self, gate: &WireGate, depth: ReviewDepth) -> io::Result<()> {
         let verdict = self.build_verdict(gate, Verdict::Go, depth);
