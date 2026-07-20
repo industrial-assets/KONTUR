@@ -20,6 +20,8 @@ pub enum HostEvent {
     Command { task: TaskId, command: String },
     GateOpened { gate_id: GateId, task: TaskId },
     GateResolved { gate_id: GateId, state: HoldState },
+    PlanProposed { tasks: Vec<String> },
+    SessionAbandoned,
 }
 
 /// Result of a cast on the operator face.
@@ -65,6 +67,20 @@ struct SessionState {
     chain: AuditChain,
     holds: Vec<HoldEntry>,
     next_gate: u64,
+    plan: Option<Vec<String>>,
+    plan_approved_tx: watch::Sender<bool>,
+    /// Kept alive so `send_replace` on `plan_approved_tx` is never a no-op
+    /// (watch::send discards when there are zero receivers; keeping one here
+    /// guarantees the channel is always live — same pattern as kontur-net).
+    _plan_approved_rx: watch::Receiver<bool>,
+    /// Set by `abandon_session` under the state lock. Once `true`,
+    /// `submit_verdict`, `begin_task_gate`, `hand_edit`, and `propose_plan`
+    /// all return `Err(GateHostError::SessionAbandoned)` immediately.
+    ///
+    /// Coherence: a cast that beats the flag commits before discard → discard
+    /// resets to the new HEAD (harmless, audit coherent). A cast after the
+    /// flag is refused → no accept post-abandon.
+    abandoned: bool,
 }
 
 /// Owns session state behind a single lock and drives `kontur-core`.
@@ -77,12 +93,17 @@ pub struct GateHost {
 impl GateHost {
     pub fn new(ctx: SessionContext, workspace: Arc<dyn Workspace>) -> Self {
         let (events, _) = broadcast::channel(64);
+        let (plan_approved_tx, _plan_approved_rx) = watch::channel(false);
         GateHost {
             state: Arc::new(Mutex::new(SessionState {
                 ctx,
                 chain: AuditChain::new(),
                 holds: Vec::new(),
                 next_gate: 0,
+                plan: None,
+                plan_approved_tx,
+                _plan_approved_rx,
+                abandoned: false,
             })),
             workspace,
             events,
@@ -92,6 +113,47 @@ impl GateHost {
     /// Subscribe to live host activity events (display-only, best-effort).
     pub fn subscribe_events(&self) -> broadcast::Receiver<HostEvent> {
         self.events.subscribe()
+    }
+
+    /// Agent face: propose a plan (list of task descriptions). Stores the plan,
+    /// emits `HostEvent::PlanProposed`, and returns a watch receiver that flips
+    /// to `true` when both operators approve. Re-proposal overwrites (idempotent).
+    pub async fn propose_plan(&self, tasks: Vec<String>) -> Result<watch::Receiver<bool>, GateHostError> {
+        let mut st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
+        // BUG CLASS: approval state lifetime must match proposal, not session.
+        // Create a fresh watch channel on each proposal. Prior subscribers are
+        // closed (their changed() errors), correctly surfacing "plan superseded".
+        // This prevents the stale-approval bypass: after approve_plan() sets
+        // `true`, a re-proposal returning a subscriber from the *old* channel
+        // would immediately read true without operator action.
+        let (new_tx, new_rx) = watch::channel(false);
+        st.plan_approved_tx = new_tx;
+        st._plan_approved_rx = new_rx;
+
+        st.plan = Some(tasks.clone());
+        // Return a new subscriber BEFORE releasing the lock so the initial
+        // `false` is always visible and `send_replace(true)` from approve_plan
+        // cannot race past this subscribe.
+        let rx = st.plan_approved_tx.subscribe();
+        drop(st);
+        let _ = self.events.send(HostEvent::PlanProposed { tasks });
+        Ok(rx)
+    }
+
+    /// Operator face: mark the proposed plan as approved, unblocking any
+    /// awaiter on the watch returned by `propose_plan`.
+    pub async fn approve_plan(&self) {
+        let st = self.state.lock().await;
+        // send_replace never discards (we keep _plan_approved_rx alive in state).
+        st.plan_approved_tx.send_replace(true);
+    }
+
+    /// Operator face: read the currently proposed plan (None until one arrives).
+    pub async fn proposed_plan(&self) -> Option<Vec<String>> {
+        self.state.lock().await.plan.clone()
     }
 
     /// The agent id for this session.
@@ -149,6 +211,9 @@ impl GateHost {
     /// discards the task and publishes the new state on the gate's watch.
     pub async fn submit_verdict(&self, gate_id: &GateId, cv: CastVerdict) -> Result<GateProgress, GateHostError> {
         let mut st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
         let idx = st
             .holds
             .iter()
@@ -228,6 +293,9 @@ impl GateHost {
         let dh = diff_hash(&frozen);
         let provenance = {
             let st = self.state.lock().await;
+            if st.abandoned {
+                return Err(GateHostError::SessionAbandoned);
+            }
             build_provenance(&st.ctx, &task_id, dh, &frozen, tokens)
         };
         Ok(self.open_gate(task_id, provenance).await)
@@ -280,6 +348,12 @@ impl GateHost {
         contents: &[u8],
         editor: OperatorId,
     ) -> Result<(GateId, watch::Receiver<HoldState>), GateHostError> {
+        {
+            let st = self.state.lock().await;
+            if st.abandoned {
+                return Err(GateHostError::SessionAbandoned);
+            }
+        }
         self.workspace.apply_write(&task_id, path, contents)?;
         let frozen = self.workspace.freeze_task_diff(&task_id)?;
         let dh = diff_hash(&frozen);
@@ -328,6 +402,33 @@ impl GateHost {
     /// Session-end: land the approved work as one reviewed commit.
     pub async fn merge_session(&self, message: &str) -> Result<(), GateHostError> {
         Ok(self.workspace.merge_session(message)?)
+    }
+
+    /// Operator kill-switch: discard all pending (Open/Partial) tasks and emit
+    /// `SessionAbandoned`. Already-resolved gates keep their audit records.
+    /// Nothing is merged.
+    ///
+    /// Coherence: `abandoned` is set to `true` under the state lock before
+    /// discards run. A concurrent `submit_verdict` that beats the flag commits
+    /// before `discard_task` runs → `discard_task` resets the worktree to the
+    /// new HEAD (harmless, audit coherent). A `submit_verdict` that loses the
+    /// race observes `abandoned = true` and returns `Err(SessionAbandoned)` →
+    /// no accept post-abandon.
+    pub async fn abandon_session(&self) -> Result<(), GateHostError> {
+        let task_ids: Vec<TaskId> = {
+            let mut st = self.state.lock().await;
+            st.abandoned = true;
+            st.holds
+                .iter()
+                .filter(|e| matches!(e.hold.state(), HoldState::Open | HoldState::Partial))
+                .map(|e| e.hold.task_id().clone())
+                .collect()
+        };
+        for task_id in task_ids {
+            self.workspace.discard_task(&task_id)?;
+        }
+        let _ = self.events.send(HostEvent::SessionAbandoned);
+        Ok(())
     }
 
     /// The session's operator roster (for composing Reviewed-by trailers).
@@ -578,6 +679,195 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abandon_session_discards_pending_and_emits_event() {
+        use tokio::sync::broadcast::error::TryRecvError;
+        use std::time::Duration;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        // Open a gate (task in Open/Partial state).
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+
+        // Cast one key → Partial state.
+        let p = host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        assert_eq!(p.state, HoldState::Partial);
+
+        let mut ev_rx = host.subscribe_events();
+
+        // Abandon: discards the pending task, emits SessionAbandoned.
+        host.abandon_session().await.unwrap();
+
+        // The pending task was discarded.
+        assert_eq!(ws.discarded_tasks(), vec![kontur_core::TaskId("t1".into())]);
+        // Nothing was accepted.
+        assert!(ws.accepted_tasks().is_empty());
+        // The audit chain is still valid (no records for this partial gate, so chain is empty-valid).
+        assert!(host.verify_audit().await.is_ok());
+
+        // SessionAbandoned event must have been emitted.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut got_abandoned = false;
+        loop {
+            match ev_rx.try_recv() {
+                Ok(HostEvent::SessionAbandoned) => { got_abandoned = true; break; }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline { break; }
+                    tokio::task::yield_now().await;
+                }
+                _ => break,
+            }
+        }
+        assert!(got_abandoned, "SessionAbandoned event must be emitted");
+    }
+
+    #[tokio::test]
+    async fn abandon_session_skips_satisfied_tasks() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        // Open and fully satisfy a gate (task becomes Satisfied/accepted).
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+        host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap();
+
+        assert_eq!(ws.accepted_tasks(), vec![kontur_core::TaskId("t1".into())]);
+        assert_eq!(host.audit_len().await, 1);
+
+        // Abandon: no pending tasks to discard, chain stays intact.
+        host.abandon_session().await.unwrap();
+
+        // No discards from abandon (already accepted earlier).
+        assert!(ws.discarded_tasks().is_empty());
+        assert!(host.verify_audit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn propose_plan_emits_event_and_approve_flips_watch() {
+        use std::time::Duration;
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        let mut ev_rx = host.subscribe_events();
+
+        let tasks = vec!["add caching".to_string(), "write tests".to_string()];
+        let mut rx = host.propose_plan(tasks.clone()).await.unwrap();
+
+        // proposed_plan() returns the tasks.
+        assert_eq!(host.proposed_plan().await, Some(tasks.clone()));
+
+        // The watch starts false.
+        assert!(!*rx.borrow());
+
+        // A PlanProposed event was emitted.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut got_event = false;
+        loop {
+            match ev_rx.try_recv() {
+                Ok(HostEvent::PlanProposed { tasks: t }) => {
+                    assert_eq!(t, tasks);
+                    got_event = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                _ => break,
+            }
+        }
+        assert!(got_event, "PlanProposed event not received");
+
+        // Obtain a fresh receiver on the same proposal channel.
+        let mut rx2 = {
+            let st = host.state.lock().await;
+            st.plan_approved_tx.subscribe()
+        };
+        assert!(!*rx2.borrow());
+
+        // Approve.
+        host.approve_plan().await;
+
+        // Both receivers on the current channel observe true after approval.
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx2.changed()).await;
+        assert!(*rx.borrow_and_update(), "rx must see true after approve");
+        assert!(*rx2.borrow_and_update(), "rx2 (direct subscribe) must see true");
+
+        // A receiver obtained AFTER approve on the same channel sees true immediately (send_replace property).
+        let rx3 = {
+            let st = host.state.lock().await;
+            st.plan_approved_tx.subscribe()
+        };
+        assert!(*rx3.borrow(), "subscriber after send_replace(true) must see true immediately");
+    }
+
+    #[tokio::test]
+    async fn propose_plan_idempotent_overwrite() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
+        host.propose_plan(vec!["task-b".to_string(), "task-c".to_string()]).await.unwrap();
+
+        // Re-proposal overwrites.
+        assert_eq!(
+            host.proposed_plan().await,
+            Some(vec!["task-b".to_string(), "task-c".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn reproposal_resets_approval() {
+        use std::time::Duration;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        // Propose plan A and approve it.
+        let mut rx1 = host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
+        host.approve_plan().await;
+
+        // The original receiver sees true.
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx1.changed()).await;
+        assert!(*rx1.borrow_and_update(), "original rx must see true after approve");
+
+        // Re-propose plan B: fresh watch channel, state reset to false.
+        let mut rx2 = host.propose_plan(vec!["task-b".to_string()]).await.unwrap();
+        assert!(!*rx2.borrow(), "re-proposal must reset approval to false");
+
+        // The old receiver's changed() now errors (channel closed by the swap).
+        let changed_result = tokio::time::timeout(Duration::from_millis(100), rx1.changed()).await;
+        assert!(
+            changed_result.is_err() || matches!(changed_result, Ok(Err(_))),
+            "old receiver's changed() must fail after channel swap"
+        );
+
+        // Approve the new plan: fresh watch transitions to true.
+        host.approve_plan().await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx2.changed()).await;
+        assert!(*rx2.borrow_and_update(), "new rx must see true after fresh approve");
+    }
+
+    #[tokio::test]
     async fn event_stream_write_gate_opened_gate_resolved() {
         use std::time::Duration;
         use tokio::sync::broadcast::error::TryRecvError;
@@ -634,5 +924,91 @@ mod tests {
         let resolved_pos = events.iter().position(|e| matches!(e, HostEvent::GateResolved { state: HoldState::Satisfied, .. })).unwrap();
         assert!(write_pos < opened_pos, "Write must precede GateOpened");
         assert!(opened_pos < resolved_pos, "GateOpened must precede GateResolved");
+    }
+
+    // -----------------------------------------------------------------------
+    // T5 race-fix tests
+    // -----------------------------------------------------------------------
+
+    /// After `abandon_session`, a second `submit_verdict` must be refused with
+    /// `SessionAbandoned`; the audit chain must be unchanged from before abandon,
+    /// and the task must have been discarded.
+    #[tokio::test]
+    async fn casts_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+
+        // First go cast — gate moves to Partial.
+        let p1 = host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        assert_eq!(p1.state, HoldState::Partial);
+
+        let audit_before = host.audit_len().await;
+
+        // Abandon — discards the task.
+        host.abandon_session().await.unwrap();
+        assert_eq!(ws.discarded_tasks(), vec![TaskId("t1".into())]);
+
+        // Second go cast after abandon must fail.
+        let err = host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+
+        // Audit chain must be unchanged (no records added after abandon).
+        assert_eq!(host.audit_len().await, audit_before);
+    }
+
+    /// After `abandon_session`, calling `begin_task_gate` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn begin_task_gate_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        host.abandon_session().await.unwrap();
+
+        // Seed a task write so the workspace can freeze it.
+        let task = TaskId("t2".into());
+        ws.apply_write(&task, "b.rs", b"y\n").unwrap();
+
+        let err = host.begin_task_gate(task, 10).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+    }
+
+    /// After `abandon_session`, calling `hand_edit` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn hand_edit_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws.clone());
+
+        host.abandon_session().await.unwrap();
+
+        let task = TaskId("t1".into());
+        let err = host.hand_edit(task, "a.rs", b"x\n", op1).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+    }
+
+    /// After `abandon_session`, calling `propose_plan` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn propose_plan_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        host.abandon_session().await.unwrap();
+
+        let err = host.propose_plan(vec!["task-a".to_string()]).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
     }
 }

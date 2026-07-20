@@ -45,9 +45,9 @@ The product's value *is* these properties. Never weaken, shortcut, or "simplify"
 ## Architecture (current direction)
 
 - **Enforcement plane: MCP.** Agents work through the hosted MCP server: `write_file`/`run_command` execute in the isolated worktree and are recorded (streamed live to the console); the **gated boundary is `propose_task_complete`**, which parks the task's frozen diff at a dual-hold until both keys resolve it. The two-signatory logic lives between MCP's pause and resume — MCP provides the primitive; the four-eyes hold is ours. Forcing a harness's *native* tools through this endpoint is future work (documented in the specs).
-- **Agent backend: Claude Code** (sole backend for MVP). Keep backend-specific glue behind a thin adapter so multi-backend stays possible later — but do not build multi-backend now.
+- **Agent backend: Claude Code** (sole backend for MVP). Keep backend-specific glue behind a thin adapter so multi-backend stays possible later — but do not build multi-backend now. Enforcement relies on Claude Code's own permission flags, not an OS-level sandbox.
 - **Topology:** one shared host holds the repo and runs the fleet; the Host's terminal is itself a seat; the Operator attaches over the network. Each agent gets a **git worktree**; approved work accumulates on a session branch and **merges once at the end** as a single reviewed commit with `Reviewed-by:` trailers.
-- **Client:** a **text-based TUI**. Two seats, one shared authoritative state, with presence (claiming is future work). The Host connects an operator via a paste-able invite link (`kontur://ip:port/token`; the token is the operator's key — magic-link model; BYO keys with host approval are future work).
+- **Client:** a **text-based TUI**. Two seats, one shared authoritative state, with presence (claiming is future work). The Host connects an operator via a paste-able invite link (`kontur://ip:port/token`; the token is the operator's key — magic-link model; BYO keys with host approval are future work). The operator wire is TLS-encrypted with the cert pinned via the fingerprint embedded in the invite link.
 
 ---
 
@@ -115,6 +115,12 @@ kontur join kontur://…
 
 # host a session (in-memory workspace; demo scripted agent)
 cargo run -p kontur-tui --bin kontur -- host --mem --demo-agent
+
+# host with a real Claude Code agent (primary path):
+cargo run -p kontur-tui --bin kontur -- host --prompt "add auth module" --claude
+# kontur spawns claude with --allowedTools mcp__kontur__* and --disallowedTools
+# Write Edit MultiEdit NotebookEdit Bash once both seats approve the dispatch gate.
+# Agent output goes to a session log (path printed on startup).
 
 # join as operator (legacy --addr/--seed form; still works)
 cargo run -p kontur-tui --bin kontur -- join --addr 127.0.0.1:7777 --seed 2

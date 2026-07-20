@@ -81,6 +81,10 @@ pub struct GateCard {
     pub keys: Vec<KeyView>,
     pub escalation_required: bool,
     pub diff_preview: Option<String>,
+    /// FR-24: whether the operator has opened the diff pane for this gate.
+    /// Must be set by the run loop after calling wire_to_view; render uses it
+    /// to gate the [g] go key hint and refuse the cast.
+    pub diff_opened: bool,
 }
 
 /// A no-go remedy being composed at a gate.
@@ -96,6 +100,7 @@ pub struct AuditSummary {
     pub reviewers: Vec<String>,
     pub chain_verified: bool,
     pub merged: bool,
+    pub abandoned: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -120,6 +125,9 @@ pub struct SessionView {
     /// Host-side only: the operator invite, shown loudly while the second
     /// station is unlinked and hidden the moment both stations link.
     pub invite: Option<String>,
+    /// Transient notice shown on the command row (bold) for a few frames —
+    /// e.g. rejection hints or confirm prompts. None → plain " > " prompt.
+    pub notice: Option<String>,
 }
 
 #[cfg(test)]

@@ -34,6 +34,7 @@ pub async fn build_session_view(
             reviewers: stations.iter().map(|s| s.label.clone()).collect(),
             chain_verified: host.verify_audit().await.is_ok(),
             merged: true, // in-memory demo: acceptance is recorded; no git merge needed
+            abandoned: false,
         })
     } else if let Some(gv) = pending.first() {
         let diff_preview = host
@@ -45,7 +46,7 @@ pub async fn build_session_view(
         ActiveRegion::Idle
     };
 
-    SessionView { banner, status, stations, fleet: agents, log, active, invite: None }
+    SessionView { banner, status, stations, fleet: agents, log, active, invite: None, notice: None }
 }
 
 fn gate_card(gv: &GateView, stations: &[Station; 2], diff_preview: Option<String>) -> GateCard {
@@ -58,6 +59,9 @@ fn gate_card(gv: &GateView, stations: &[Station; 2], diff_preview: Option<String
         keys,
         escalation_required: gv.escalation_required,
         diff_preview,
+        // demo/viewmodel path: diff tracking is not available here;
+        // diff_opened is set by the run loop in remote.rs for the two-seat mode.
+        diff_opened: false,
     }
 }
 

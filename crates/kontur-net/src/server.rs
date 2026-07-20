@@ -70,6 +70,7 @@ enum Phase {
         chain_verified: bool,
         reviewers: Vec<String>,
         merged: bool,
+        abandoned: bool,
     },
 }
 
@@ -89,6 +90,7 @@ struct Net {
     agent_done: bool,
     finalizing: bool,
     started: Instant,
+    agent_plan: Option<Vec<String>>,
 }
 
 struct Inner {
@@ -161,6 +163,7 @@ impl SessionServer {
             agent_done: false,
             finalizing: false,
             started: Instant::now(),
+            agent_plan: None,
         };
 
         let server = SessionServer {
@@ -264,6 +267,29 @@ impl SessionServer {
                 let _ = state; // acknowledged, cast handler logs it
                 let _ = gate_id;
                 self.refresh_locked().await;
+            }
+            HostEvent::PlanProposed { tasks } => {
+                let n = tasks.len();
+                let mut net = self.inner.net.lock().await;
+                net.agent_plan = Some(tasks);
+                if let Some(existing) = net.fleet.iter_mut().find(|c| c.id == agent_id) {
+                    existing.status = format!("plan: {n} task(s) awaiting approval");
+                    existing.needs_signoff = true;
+                } else {
+                    net.fleet.push(WireFleetCard {
+                        id: agent_id.to_owned(),
+                        status: format!("plan: {n} task(s) awaiting approval"),
+                        tokens: 0,
+                        needs_signoff: true,
+                    });
+                }
+                push_log(&mut net, &format!("agent proposed {n} tasks"));
+                drop(net);
+                self.refresh_locked().await;
+            }
+            HostEvent::SessionAbandoned => {
+                // The abandon handler in handle_client_msg already logs and
+                // transitions the phase; nothing extra to do here.
             }
         }
     }
@@ -488,12 +514,28 @@ async fn handle_client_msg(
                         push_log(&mut net, "dispatch confirmed · plan review");
                     }
                     Phase::PlanReview => {
+                        // Determine the effective plan: agent-proposed takes priority
+                        // over the scripted config plan; if both are empty, refuse.
+                        let effective_plan = net.agent_plan.clone().unwrap_or_else(|| server.inner.cfg.plan.clone());
+                        if effective_plan.is_empty() {
+                            // Consent must be re-signalled against the actual plan (no anchoring).
+                            net.seats[0].ready = false;
+                            net.seats[1].ready = false;
+                            push_log(&mut net, "waiting for agent plan");
+                            drop(net);
+                            server.refresh_locked().await;
+                            return;
+                        }
                         net.phase = Phase::Executing;
                         net.seats[0].ready = false;
                         net.seats[1].ready = false;
                         push_log(&mut net, "plan approved · executing");
                         let plan_tx = server.inner.plan_tx.clone();
+                        let host = server.inner.host.clone();
                         drop(net);
+                        // Approve the real-agent's propose_plan (releases the parked
+                        // MCP call). A no-op when no real agent has called propose_plan.
+                        host.approve_plan().await;
                         // send_replace, NOT send: watch::Sender::send discards the
                         // value when no receiver is subscribed yet, and the agent
                         // task may not have subscribed under scheduler load — the
@@ -516,6 +558,8 @@ async fn handle_client_msg(
 
             match server.inner.host.submit_verdict(&gate_id, verdict).await {
                 Err(e) => {
+                    // Surface SessionAbandoned as a Rejected reason so the
+                    // casting operator knows post-abandon casts are closed.
                     let _ = conn_tx
                         .send(ServerMsg::Rejected { reason: e.to_string() })
                         .await;
@@ -580,6 +624,48 @@ async fn handle_client_msg(
                     server.refresh_locked().await;
                 }
             }
+        }
+        ClientMsg::Abandon => {
+            let label = {
+                let net = server.inner.net.lock().await;
+                net.seats[seat_idx].label.clone()
+            };
+
+            // Guard: if already Closed, ignore (race with finalize or double-abandon).
+            {
+                let mut net = server.inner.net.lock().await;
+                if matches!(net.phase, Phase::Closed { .. }) {
+                    return;
+                }
+                // Claim finalizing regardless — abandon wins races with finalize.
+                net.finalizing = true;
+            }
+
+            // Discard all pending tasks via GateHost.
+            if let Err(e) = server.inner.host.abandon_session().await {
+                let mut net = server.inner.net.lock().await;
+                push_log(&mut net, &format!("abandon error: {e}"));
+            }
+
+            let gates = server.inner.host.audit_len().await;
+            let chain_verified = server.inner.host.verify_audit().await.is_ok();
+
+            let new_phase = {
+                let net = server.inner.net.lock().await;
+                let reviewers = vec![
+                    net.seats[0].label.clone(),
+                    net.seats[1].label.clone(),
+                ];
+                Phase::Closed { gates, chain_verified, reviewers, merged: false, abandoned: true }
+            };
+
+            {
+                let mut net = server.inner.net.lock().await;
+                net.phase = new_phase;
+                push_log(&mut net, &format!("{label} abandoned the session — nothing merged"));
+            }
+
+            server.refresh_locked().await;
         }
         ClientMsg::Bye => {
             // Reader task will handle disconnect naturally when the stream closes
@@ -666,7 +752,7 @@ impl SessionServer {
                 net.seats[0].label.clone(),
                 net.seats[1].label.clone(),
             ];
-            Phase::Closed { gates, chain_verified, reviewers, merged }
+            Phase::Closed { gates, chain_verified, reviewers, merged, abandoned: false }
         };
 
         {
@@ -689,14 +775,15 @@ impl SessionServer {
                 prompt: inner.cfg.prompt.clone(),
             },
             Phase::PlanReview => WirePhase::PlanReview {
-                tasks: inner.cfg.plan.clone(),
+                tasks: net.agent_plan.clone().unwrap_or_else(|| inner.cfg.plan.clone()),
             },
             Phase::Executing => WirePhase::Executing,
-            Phase::Closed { gates, chain_verified, reviewers, merged } => WirePhase::Closed {
+            Phase::Closed { gates, chain_verified, reviewers, merged, abandoned } => WirePhase::Closed {
                 gates: *gates,
                 chain_verified: *chain_verified,
                 reviewers: reviewers.clone(),
                 merged: *merged,
+                abandoned: *abandoned,
             },
         };
 
@@ -1343,7 +1430,8 @@ mod tests {
         let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
         let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
 
-        let (server, ws) = make_server(op1, op2, vec![]);
+        // Non-empty plan so both-ready transitions through PlanReview.
+        let (server, ws) = make_server(op1, op2, vec!["dummy".into()]);
         let mut state_rx = server.state_rx();
 
         // Drive both seats through to Executing manually (no agent tasks).
@@ -1410,6 +1498,225 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Test: abandon_mid_gate_discards_and_closes
+    //
+    // One seat sends Abandon while a gate is open. The session must:
+    //   - transition to Closed { abandoned: true, merged: false }
+    //   - discard the pending task
+    //   - leave the audit chain intact (any pre-existing records still verify)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn abandon_mid_gate_discards_and_closes() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+
+        let server_for_agent = server.clone();
+        tokio::spawn(crate::agent::run_agent(agent, server_for_agent));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 })
+            .await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Wait for a gate to appear.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            s.gate.is_some()
+        })).await.expect("gate");
+
+        // A sends Abandon while the gate is open.
+        write_json(&mut ca_write, &ClientMsg::Abandon).await.unwrap();
+
+        // Session must close with abandoned=true, merged=false.
+        let final_state = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| matches!(s.phase, WirePhase::Closed { .. })),
+        )
+        .await
+        .expect("timed out waiting for Closed after Abandon");
+
+        match &final_state.phase {
+            WirePhase::Closed { merged, abandoned, .. } => {
+                assert!(*abandoned, "phase must be abandoned=true");
+                assert!(!merged, "nothing should be merged on abandon");
+            }
+            _ => panic!("expected Closed phase"),
+        }
+
+        // The pending task was discarded.
+        assert!(
+            !ws.discarded_tasks().is_empty(),
+            "pending task must have been discarded"
+        );
+
+        // The audit chain (which had no resolved gates yet) still verifies.
+        assert!(
+            server.inner.host.verify_audit().await.is_ok(),
+            "audit chain must remain intact after abandon"
+        );
+
+        // The session log mentions the abandon.
+        assert!(
+            final_state.log.iter().any(|l| l.contains("abandoned")),
+            "log must mention abandon; log = {:?}",
+            final_state.log
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: abandon_after_close_is_ignored
+    //
+    // Sending Abandon when the session is already Closed must be a no-op.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn abandon_after_close_is_ignored() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+
+        let server_for_agent = server.clone();
+        tokio::spawn(crate::agent::run_agent(agent, server_for_agent));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 })
+            .await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Wait for a gate.
+        let state_with_gate = tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            s.gate.is_some()
+        })).await.expect("gate");
+
+        let wire_gate = state_with_gate.gate.unwrap();
+        let gate_id = wire_gate.gate_id.clone();
+        let diff_hash = wire_gate.diff_hash;
+
+        // Both cast go → normal close.
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Cast {
+                gate_id: gate_id.clone(),
+                verdict: cast_go(1, &gate_id, diff_hash),
+            },
+        ).await.unwrap();
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Cast {
+                gate_id: gate_id.clone(),
+                verdict: cast_go(2, &gate_id, diff_hash),
+            },
+        ).await.unwrap();
+
+        // Wait for normal Closed.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Closed { .. })
+        })).await.expect("normal Closed");
+
+        // Now send Abandon — must be ignored (no double-transition).
+        write_json(&mut ca_write, &ClientMsg::Abandon).await.unwrap();
+
+        // Give the server a moment to process (if it were going to do anything).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // The final state must still be a normal close: abandoned=false, merged=true.
+        let current = state_rx.borrow().clone();
+        match &current.phase {
+            WirePhase::Closed { abandoned, merged, .. } => {
+                assert!(!abandoned, "phase must not flip to abandoned after normal close");
+                assert!(merged, "session must remain merged=true");
+            }
+            _ => panic!("expected still Closed"),
+        }
+
+        // Log must contain exactly one close-type entry mentioning "session closed"
+        // (no "abandoned" line appended after the fact).
+        let abandon_count = current.log.iter().filter(|l| l.contains("abandoned")).count();
+        assert_eq!(abandon_count, 0, "no abandon log line expected; log = {:?}", current.log);
+    }
+
+    // -----------------------------------------------------------------------
     // Test 5: external_agent_activity_streams_without_operator_action
     //
     // Verifies that calling host.record_write and host.begin_task_gate
@@ -1465,6 +1772,136 @@ mod tests {
             matched.log.iter().any(|l| l.contains("wrote")),
             "log must contain a 'wrote' line; log = {:?}",
             matched.log
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T5 race-fix: post-abandon cast receives Rejected with "abandoned" reason
+    //
+    // After Abandon closes the session, a Cast message arriving on the same
+    // connection must produce a Rejected response whose reason contains
+    // "abandoned". This proves the SessionAbandoned guard is wired through
+    // handle_client_msg → submit_verdict → ServerMsg::Rejected.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_abandon_cast_receives_rejected() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+
+        let server_for_agent = server.clone();
+        tokio::spawn(crate::agent::run_agent(agent, server_for_agent));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        // Split client A into read/write. We keep the read side live so we
+        // can inspect Rejected messages sent back to A.
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+
+        // B's read side is only drained (we don't need to inspect B's messages).
+        drain_client(BufReader::new(cb_read)).await;
+
+        // Wrap A's read side so we can call read_json on it.
+        let mut ca_reader = BufReader::new(ca_read);
+
+        // Send Hello from both
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 })
+            .await.unwrap();
+
+        // Drain incoming server messages on A until DispatchReady.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Wait for a gate.
+        let state_with_gate = tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            s.gate.is_some()
+        })).await.expect("gate");
+
+        let wire_gate = state_with_gate.gate.unwrap();
+        let gate_id = wire_gate.gate_id.clone();
+        let diff_hash = wire_gate.diff_hash;
+
+        // A sends Abandon.
+        write_json(&mut ca_write, &ClientMsg::Abandon).await.unwrap();
+
+        // Wait for the session to close.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Closed { .. })
+        })).await.expect("Closed after Abandon");
+
+        // Drain all outstanding state messages from A's read side so we can
+        // spot the Rejected response to the upcoming Cast.
+        // (The writer task sends state snapshots; we want to get past them.)
+        let (drain_tx, mut drain_rx) = tokio::sync::mpsc::channel::<ServerMsg>(64);
+        let drain_tx_clone = drain_tx.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(msg)) = read_json::<_, ServerMsg>(&mut ca_reader).await {
+                let _ = drain_tx_clone.send(msg).await;
+            }
+        });
+
+        // Now A casts on the abandoned gate — should produce a Rejected.
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Cast {
+                gate_id: gate_id.clone(),
+                verdict: cast_go(1, &gate_id, diff_hash),
+            },
+        ).await.unwrap();
+
+        // Wait for a Rejected message whose reason contains "abandoned".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut got_rejected = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, drain_rx.recv()).await {
+                Ok(Some(ServerMsg::Rejected { reason })) if reason.contains("abandoned") => {
+                    got_rejected = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            got_rejected,
+            "post-abandon Cast must produce Rejected with 'abandoned' in reason"
         );
     }
 }

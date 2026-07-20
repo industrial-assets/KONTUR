@@ -61,13 +61,13 @@ the entire new machinery without needing the `claude` binary in tests.
 ## 4. Wire encryption with pinning
 
 - `tokio-rustls` + `rcgen`: the host generates a per-session self-signed cert; the
-  operator listener speaks TLS. The invite link gains the cert's SPKI SHA-256
-  fingerprint: `kontur://ip:port/<token>#<fp-hex>`; the joining client verifies the
-  pinned fingerprint (no CA, no hostname check — the pin is the trust root, and the
-  link already travels a private channel). Old un-pinned links are rejected by the new
-  client with a clear error.
-- The agent endpoint stays localhost-plaintext (CC connects via local `nc`); binding it
-  to non-localhost prints a warning.
+  operator listener speaks TLS. The invite link gains the SHA-256 of the
+  DER-encoded certificate as the fingerprint: `kontur://ip:port/<token>#<fp-hex>`;
+  the joining client verifies the pinned fingerprint (no CA, no hostname check —
+  the pin is the trust root, and the link already travels a private channel).
+  Old un-pinned links are rejected by the new client with a clear error.
+- The agent endpoint stays localhost-plaintext (CC connects via local `nc`); the agent
+  endpoint is hard-bound to 127.0.0.1 (remote agents are not a supported topology yet).
 
 ## Constraints carried
 

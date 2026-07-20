@@ -1,12 +1,13 @@
 //! Remote two-seat mode: connects to a kontur-net SessionServer over TCP,
 //! maps WireState → SessionView, and runs the interactive terminal loop.
 
+use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
 
-use kontur_core::{OperatorId, VerdictStatus, Verdict};
+use kontur_core::{OperatorId, ReviewDepth, VerdictStatus, Verdict};
 use kontur_net::{ServerMsg, SessionClient, WireGate, WirePhase, WireRole, WireState};
 
 use crate::app::{poll_action, TerminalGuard};
@@ -26,6 +27,7 @@ enum ComposeTarget {
     Remedy,
     HandEditPath,
     HandEditContents { path: String },
+    ConfirmAbandon,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,12 +141,13 @@ pub fn wire_to_view(state: &WireState, own: OperatorId) -> SessionView {
                 ActiveRegion::Idle
             }
         }
-        WirePhase::Closed { gates, chain_verified, reviewers, merged } => {
+        WirePhase::Closed { gates, chain_verified, reviewers, merged, abandoned } => {
             ActiveRegion::SessionClosed(AuditSummary {
                 gates: *gates,
                 chain_verified: *chain_verified,
                 reviewers: reviewers.clone(),
                 merged: *merged,
+                abandoned: *abandoned,
             })
         }
     };
@@ -157,6 +160,7 @@ pub fn wire_to_view(state: &WireState, own: OperatorId) -> SessionView {
         log,
         active,
         invite: None,
+        notice: None,
     }
 }
 
@@ -186,6 +190,8 @@ fn wire_gate_to_card(wg: &WireGate, stations: &[Station; 2]) -> GateCard {
         keys,
         escalation_required: wg.escalation_required,
         diff_preview: wg.diff_preview.clone(),
+        // diff_opened is runtime UI state, set by the run loop after this call.
+        diff_opened: false,
     }
 }
 
@@ -232,13 +238,33 @@ pub fn compose_invite_text(links: &crate::link::InviteLinks, mode: LinkMode) -> 
     Some(text)
 }
 
+// ---------------------------------------------------------------------------
+// FR-24 pure helpers (unit-tested below)
+// ---------------------------------------------------------------------------
+
+/// FR-24: a `go` requires having opened the diff; a `no-go` is always castable
+/// (refusal is never blocked) but its signed depth records what actually
+/// happened: FullDiff if the diff was opened, Summary if not.
+pub fn depth_for_cast(opened: bool) -> ReviewDepth {
+    if opened { ReviewDepth::FullDiff } else { ReviewDepth::Summary }
+}
+
+/// FR-24: `go` is only allowed once the operator has opened the diff.
+pub fn go_allowed(opened: bool) -> bool {
+    opened
+}
+
 pub async fn run_remote(
     addr: &str,
     seat: String,
     seed: [u8; 32],
     invite: Option<crate::link::InviteLinks>,
+    fingerprint: Option<[u8; 32]>,
 ) -> io::Result<()> {
-    let (client, mut rx) = SessionClient::connect_tcp(addr, seat, seed).await?;
+    let (client, mut rx) = match fingerprint {
+        Some(fp) => SessionClient::connect_pinned_tls(addr, seat, seed, fp).await?,
+        None => SessionClient::connect_tcp_plain(addr, seat, seed).await?,
+    };
     let own = client.operator();
     let mut link_mode = LinkMode::Lan;
 
@@ -277,6 +303,8 @@ pub async fn run_remote(
     let mut diff_open = false;
     let mut rejected_msg: Option<String> = None;
     let mut rejected_ttl: u8 = 0;
+    // runtime-only UI state — the no-HashMap rule applies to canonical/hashed data, not here
+    let mut opened_diffs: HashSet<String> = HashSet::new();
 
     loop {
         // Pick up any new rejection message.
@@ -296,6 +324,26 @@ pub async fn run_remote(
         // linked; the moment they are, it disappears (calm default).
         if !view.status.linked {
             view.invite = invite.as_ref().and_then(|l| compose_invite_text(l, link_mode));
+        }
+
+        // FR-24: set diff_opened on the active gate card AFTER wire_to_view,
+        // since wire_to_view cannot know about runtime UI state.
+        let active_gate_id = state.gate.as_ref().map(|g| g.gate_id.0.clone());
+        if let ActiveRegion::Gate(ref mut card) = view.active {
+            if let Some(ref gid) = active_gate_id {
+                card.diff_opened = opened_diffs.contains(gid);
+            }
+        }
+
+        // Transient notice: while ttl > 0 the rejection/confirm message is
+        // shown on the command row inside the TUI (never via eprintln).
+        if rejected_ttl > 0 {
+            view.notice = rejected_msg.clone();
+        }
+        // ConfirmAbandon state: surface the confirm prompt via notice while
+        // composing (ttl may not be set yet if the state was just entered).
+        if matches!(compose, ComposeTarget::ConfirmAbandon) && view.notice.is_none() {
+            view.notice = Some("abandon session? [y] confirm · [esc] cancel".into());
         }
 
         terminal.draw(|f| {
@@ -320,10 +368,16 @@ pub async fn run_remote(
                 let _ = client.ready().await;
             }
 
-            // Go verdict.
+            // Go verdict — FR-24: requires the diff to have been opened.
             Some(Action::Go) => {
                 if let Some(wg) = &state.gate {
-                    let _ = client.cast_go(wg).await;
+                    let opened = opened_diffs.contains(&wg.gate_id.0);
+                    if go_allowed(opened) {
+                        let _ = client.cast_go(wg, ReviewDepth::FullDiff).await;
+                    } else {
+                        rejected_msg = Some("open the diff first — [o]".into());
+                        rejected_ttl = 30;
+                    }
                 }
             }
 
@@ -333,15 +387,34 @@ pub async fn run_remote(
                 compose_buf.clear();
             }
 
+            // Abandon → request confirmation.
+            Some(Action::AbandonBegin) => {
+                compose = ComposeTarget::ConfirmAbandon;
+                compose_buf.clear();
+                rejected_msg = Some("abandon session? [y] confirm · [esc] cancel".into());
+                rejected_ttl = 60;
+            }
+
+            Some(Action::AbandonConfirm) => {
+                let _ = client.abandon().await;
+            }
+
             // Hand-edit → start path compose.
             Some(Action::HandEdit) => {
                 compose = ComposeTarget::HandEditPath;
                 compose_buf.clear();
             }
 
-            // Diff toggle.
+            // Diff toggle — FR-24: opening the diff marks this gate as opened.
             Some(Action::OpenDiff) => {
                 diff_open = !diff_open;
+                // Mark opened when we're toggling the diff on (diff_open was
+                // false before this action; we just set it to true).
+                if diff_open {
+                    if let Some(wg) = &state.gate {
+                        opened_diffs.insert(wg.gate_id.0.clone());
+                    }
+                }
             }
             Some(Action::ToggleLink) => {
                 link_mode = match link_mode {
@@ -352,7 +425,15 @@ pub async fn run_remote(
 
             // Composing text.
             Some(Action::RemedyChar(c)) => {
-                compose_buf.push(c);
+                if matches!(compose, ComposeTarget::ConfirmAbandon) {
+                    if c == 'y' {
+                        let _ = client.abandon().await;
+                    }
+                    compose = ComposeTarget::None;
+                    compose_buf.clear();
+                } else {
+                    compose_buf.push(c);
+                }
             }
             Some(Action::RemedyBackspace) => {
                 compose_buf.pop();
@@ -364,7 +445,8 @@ pub async fn run_remote(
                             // no bare veto: keep composing until a real steer exists
                         } else {
                             if let Some(wg) = &state.gate {
-                                let _ = client.cast_nogo(wg, &compose_buf).await;
+                                let opened = opened_diffs.contains(&wg.gate_id.0);
+                                let _ = client.cast_nogo(wg, &compose_buf, depth_for_cast(opened)).await;
                             }
                             compose = ComposeTarget::None;
                             compose_buf.clear();
@@ -383,6 +465,11 @@ pub async fn run_remote(
                         compose = ComposeTarget::None;
                         compose_buf.clear();
                     }
+                    ComposeTarget::ConfirmAbandon => {
+                        // Enter on confirm-abandon cancels (no bare confirm via Enter)
+                        compose = ComposeTarget::None;
+                        compose_buf.clear();
+                    }
                     ComposeTarget::None => {}
                 }
             }
@@ -392,11 +479,6 @@ pub async fn run_remote(
             }
 
             Some(_) => {}
-        }
-
-        // Show rejection reason on stderr (transient).
-        if let Some(ref msg) = rejected_msg {
-            eprintln!("REJECTED: {}", msg);
         }
     }
 
@@ -410,7 +492,7 @@ pub async fn run_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kontur_core::{VerdictStatus, OperatorId};
+    use kontur_core::{ReviewDepth, VerdictStatus, OperatorId};
     use kontur_net::{WireGate, WirePhase, WireRole, WireSeat, WireState};
     use kontur_core::GateId;
     use kontur_core::Hash;
@@ -522,6 +604,7 @@ mod tests {
             chain_verified: true,
             reviewers: vec!["A".into(), "B".into()],
             merged: true,
+            abandoned: false,
         });
 
         let view = wire_to_view(&state, op(1));
@@ -531,6 +614,7 @@ mod tests {
                 assert!(summary.chain_verified);
                 assert_eq!(summary.reviewers, vec!["A".to_string(), "B".to_string()]);
                 assert!(summary.merged);
+                assert!(!summary.abandoned);
             }
             other => panic!("expected SessionClosed, got {:?}", other),
         }
@@ -573,6 +657,45 @@ mod tests {
             view2.invite = invite.clone();
         }
         assert!(view2.invite.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-24: go_allowed / depth_for_cast matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn go_allowed_requires_opened_diff() {
+        assert!(!go_allowed(false), "go must be blocked when diff not opened");
+        assert!(go_allowed(true), "go must be allowed after diff opened");
+    }
+
+    #[test]
+    fn depth_for_cast_full_diff_when_opened() {
+        assert_eq!(depth_for_cast(true), ReviewDepth::FullDiff);
+    }
+
+    #[test]
+    fn depth_for_cast_summary_when_not_opened() {
+        assert_eq!(depth_for_cast(false), ReviewDepth::Summary);
+    }
+
+    // FR-24: a verdict built with Summary depth carries that depth.
+    #[test]
+    fn cast_verdict_carries_summary_depth() {
+        use kontur_core::{CastVerdict, Ed25519Signer, FixedClock, GateId, Hash, ReviewDepth, Verdict, Remedy};
+        let signer = Ed25519Signer::from_seed([5u8; 32]);
+        let gate_id = GateId("gate-fr24".into());
+        let diff_hash = Hash([0u8; 32]);
+        let cv = CastVerdict::create(
+            &signer,
+            &FixedClock(42),
+            &gate_id,
+            diff_hash,
+            Verdict::NoGo(Remedy::Steer("needs tests".into())),
+            ReviewDepth::Summary,
+            None,
+        );
+        assert_eq!(cv.depth, ReviewDepth::Summary, "CastVerdict must carry Summary depth");
     }
 
     #[test]

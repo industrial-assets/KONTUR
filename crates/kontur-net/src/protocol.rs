@@ -15,6 +15,7 @@ pub enum ClientMsg {
     Ready,
     Cast { gate_id: GateId, verdict: CastVerdict },
     HandEdit { path: String, contents: String },
+    Abandon,
     Bye,
 }
 
@@ -40,7 +41,7 @@ pub enum WirePhase {
     DispatchReady { prompt: String },
     PlanReview { tasks: Vec<String> },
     Executing,
-    Closed { gates: usize, chain_verified: bool, reviewers: Vec<String>, merged: bool },
+    Closed { gates: usize, chain_verified: bool, reviewers: Vec<String>, merged: bool, abandoned: bool },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
