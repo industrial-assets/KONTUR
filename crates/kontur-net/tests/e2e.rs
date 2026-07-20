@@ -37,6 +37,7 @@ fn temp_repo() -> PathBuf {
         let out = Command::new("git")
             .arg("-C")
             .arg(&p)
+            .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .output()
             .unwrap();

@@ -21,7 +21,16 @@ pub struct GitWorkspace {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, WorkspaceError> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output()
+    // Kontur-issued commits are mechanical (task commits, squash-merge); the
+    // signed, tamper-evident record is the audit chain, not git signatures.
+    // Disabling gpg here keeps sessions immune to gpg-agent failures under a
+    // user's global commit.gpgsign=true.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .output()
         .map_err(|e| WorkspaceError::Io(e.to_string()))?;
     if !out.status.success() {
         return Err(WorkspaceError::Io(format!(
