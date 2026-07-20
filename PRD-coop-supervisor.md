@@ -167,6 +167,11 @@ Each gate record captures:
 
 Precedent: the Linux kernel already does maker-checker in git via `Signed-off-by:` / `Reviewed-by:` trailers — this formalises and enforces the same pattern.
 
+**Residual integrity gap & planned hardening (future functionality, 20 Jul 2026).** The chain is tamper-*evident* (any mutation fails verification) but a party controlling the only stored copy could truncate or discard it — evidence that vanishes isn't evidence. Two planned mitigations close this without a blockchain (a full distributed ledger solves multi-writer consensus, a problem a one-host/two-signer session does not have):
+
+1. **Operator-side record replication** — both consoles retain an independent copy of every gate record as it is emitted; the host cannot truncate what the counterparty holds.
+2. **External anchoring** — at session close (optionally per gate), publish the 32-byte chain-head hash to a witness outside the host's control: Sigstore Rekor (public append-only transparency log), OpenTimestamps, or an RFC 3161 TSA for maximum auditor familiarity. Only hashes leave the machine.
+
 ---
 
 ## 10. Technical architecture (high-level, TBD)
@@ -242,7 +247,7 @@ The market splits into two camps, and neither is this:
 
 - **MVP:** shared host + two-seat TUI; Claude Code as sole backend; **MCP as the action/enforcement plane** (consequential actions routed through hosted MCP servers, gated for approval); dispatch gate as live co-edit; sequential execution; merge gate with unanimous dual approval; hand-edit; audit record + git trailers.
 - **v1:** downstream replan/ripple; presence/claim polish; blind second review; risk-tiering; rotation support.
-- **Later:** multi-agent parallelism within a session; multiple agent backends; richer observability.
+- **Later:** multi-agent parallelism within a session; multiple agent backends; richer observability; **audit-chain hardening** — operator-side record replication + external chain-head anchoring (Rekor / OpenTimestamps / RFC 3161), see §9; operator-supplied keys with host-side approval (replacing magic-link invites).
 
 ---
 
