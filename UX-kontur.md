@@ -35,6 +35,8 @@ Two engineers, co-supervising. Roles are explicit and rotate (PRD FR-23):
 
 Rotation happens per task or per session; the console always labels who currently holds which role. Neither role is "senior" — the point is two independent vantage points, not a lead and an assistant.
 
+> **Superseded (20 Jul 2026):** driver/navigator rotation is replaced by structural **Host/Operator** seats (the Host provides the agent backend; both seats are co-equal checkers; no rotation). Independence now rests on the two-distinct-keys requirement alone.
+
 ---
 
 ## 4. Console anatomy
@@ -77,6 +79,8 @@ Both stations always show. `[tab]` hands the driver role across; rotation is one
 
 Rotation can also be **scheduled**: at session start the operators agree an interval, and Kontur runs an **invisible timer** — no visible countdown, in keeping with the calm default — that quietly surfaces a rotation nudge when the interval elapses, at the next natural break (a gate boundary, never mid-review). The nudge is a dismissable suggestion, never a forced swap, and any rotation — manual or prompted — resets the timer. The point is to fight navigator fatigue without putting a clock on screen.
 
+> **Superseded (20 Jul 2026):** driver/navigator rotation is replaced by structural **Host/Operator** seats (the Host provides the agent backend; both seats are co-equal checkers; no rotation). Independence now rests on the two-distinct-keys requirement alone.
+
 ### 5.4 The blind sign-off (where the two consoles diverge)
 At a high-risk gate, the two operators **do not see the same thing** — by design. The first key is cast and *sealed*; the second operator reviews the change without seeing the first's verdict, so they can't anchor to it (PRD §10.1, FR-12). The consoles reconverge the instant both keys are in. This is the one deliberate break from "two operators, one truth," and it's the mechanism that makes the second signature worth more than the first.
 
@@ -97,20 +101,20 @@ Both linked, no fleet, empty prompt buffer. The console invites an instruction.
 ------------------------------------------------------------------------
  [ STATIONS ]
  ┌─ A · YOU ─────────────────────┐ ┌─ B · J. REED ────────────────────┐
- │ DRIVER · idle                 │ │ NAVIGATOR · idle                 │
+ │ HOST · idle                   │ │ OPERATOR · idle                  │
  └───────────────────────────────┘ └──────────────────────────────────┘
  [ PROMPT ]  no task dispatched — draft an instruction to begin
  ┌────────────────────────────────────────────────────────────────────┐
  │ _                                                                    │
  └────────────────────────────────────────────────────────────────────┘
- >  type to draft · [tab] hand to navigator · [^↵] request dispatch
+ >  type to draft · [y] mark ready · [^↵] request dispatch
 ```
 
 ### 6.2 Prompt co-construction — the dispatch gate
-The driver types; the navigator reviews live and can suggest inline. This *is* the dispatch gate — a continuous review, not a separate checkpoint (PRD §5). The prompt can't be dispatched until both mark ready.
+Either seat drafts; the other reviews live and can suggest inline. This *is* the dispatch gate — a continuous review, not a separate checkpoint (PRD §5). The prompt can't be dispatched until both mark ready.
 
 ```
- [ PROMPT ]  drafting · driver: you · navigator reviewing live
+ [ PROMPT ]  drafting · host: you · operator reviewing live
  ┌────────────────────────────────────────────────────────────────────┐
  │ refactor the session guard in auth/session.ts to use the new        │
  │ token store; keep the public interface stable.                      │
@@ -120,7 +124,7 @@ The driver types; the navigator reviews live and can suggest inline. This *is* t
  >  [^↵] dispatch — needs both ready
 ```
 
-The navigator's suggestion is a proposal the driver accepts, which leaves a trace that the navigator actually engaged rather than passively watched.
+A reviewer's suggestion is a proposal the drafter accepts, which leaves a trace that the second seat actually engaged rather than passively watched.
 
 ### 6.3 Plan review
 The agent analyses and returns a task list — a DAG of bounded, single-concern tasks (PRD FR-6). Both operators approve or edit before any code is written.
@@ -145,7 +149,7 @@ The default working view. Agents run through tasks sequentially; the fleet is ca
 ------------------------------------------------------------------------
  [ STATIONS ]
  ┌─ A · YOU ─────────────────────┐ ┌─ B · J. REED ────────────────────┐
- │ DRIVER · watching             │ │ NAVIGATOR · reviewing gate-03    │
+ │ HOST · watching               │ │ OPERATOR · reviewing gate-03     │
  └───────────────────────────────┘ └──────────────────────────────────┘
  [ FLEET ]
  ┌─ AGENT-01 ────────────────────┐ ┌─ AGENT-02 ───┐ ┌─ AGENT-03 ──────┐
@@ -260,9 +264,9 @@ Because two distinct keys are structurally required, losing an operator *stalls 
 ## 7. Key journeys
 
 - **Clean task.** Dispatch → plan approved → agent works t1 → both go → repeat → merge. Calm throughout; the console never raised its voice.
-- **Caught in review.** Agent-03's diff parks; navigator claims it, spots an uncached lookup, casts no-go with a steer; agent reworks; t4 re-flagged; second pass goes unanimous. The audit shows a `resolved-after-disagreement` — evidence the second pair of eyes did work.
-- **Emergency.** Agent about to write a destructive migration; driver hand-edits to guard it, applied instantly; combined diff re-signed by both (pragmatic mode) before merge; audit flags the task `hand-edited`.
-- **Partner steps away.** Navigator drops mid-session; open gates park; driver either waits or escalates to a third signatory — never self-approves.
+- **Caught in review.** Agent-03's diff parks; the Operator claims it, spots an uncached lookup, casts no-go with a steer; agent reworks; t4 re-flagged; second pass goes unanimous. The audit shows a `resolved-after-disagreement` — evidence the second pair of eyes did work.
+- **Emergency.** Agent about to write a destructive migration; either seat hand-edits to guard it, applied instantly; combined diff re-signed by both (pragmatic mode) before merge; audit flags the task `hand-edited`.
+- **Partner steps away.** The Operator drops mid-session; open gates park; the Host either waits or escalates to a third signatory — never self-approves.
 
 ---
 
@@ -277,6 +281,6 @@ Terse, operational, lower-case for machine chatter, plain English for anything f
 1. **Diff review surface.** Where and how the full diff renders for review — inline expand under the gate, a dedicated pane, or handoff to the operator's pager/editor. (The gate shows the summary; the deep read is TBD.)
 2. **Availability policy default & escalation UX.** Park-indefinitely vs escalate-to-third; how a third signatory is nominated and joins mid-session.
 3. **Blind vs live sign-off by tier.** Which risk tiers seal the first verdict and which reveal live — and how the operator knows which mode a gate is in.
-4. **Dispatch-gate depth.** The prompt-review interaction is sketched (§6.2) but the "ready" bar and how the navigator's suggestions are tracked need their own pass (mirrors PRD open question #3).
+4. **Dispatch-gate depth.** The prompt-review interaction is sketched (§6.2) but the "ready" bar and how the reviewing seat's suggestions are tracked need their own pass (mirrors PRD open question #3).
 5. **Fleet scale.** Layout behaviour when the fleet is larger than the panels comfortably fit — scroll, collapse-calm-agents, or a density mode.
 6. **Onboarding.** First-run experience for operators who haven't used a TUI of this density.
