@@ -101,7 +101,8 @@ impl KonturServer {
         &self,
         Parameters(ProposePlanInput { tasks }): Parameters<ProposePlanInput>,
     ) -> Result<Json<ProposePlanOutput>, ErrorData> {
-        let mut rx = self.host.propose_plan(tasks).await;
+        let mut rx = self.host.propose_plan(tasks).await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         // Await approval. borrow_and_update reads the current value and marks
         // it seen; loop until true. A closed channel means the session closed.

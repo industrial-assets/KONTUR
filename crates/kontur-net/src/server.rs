@@ -558,6 +558,8 @@ async fn handle_client_msg(
 
             match server.inner.host.submit_verdict(&gate_id, verdict).await {
                 Err(e) => {
+                    // Surface SessionAbandoned as a Rejected reason so the
+                    // casting operator knows post-abandon casts are closed.
                     let _ = conn_tx
                         .send(ServerMsg::Rejected { reason: e.to_string() })
                         .await;
@@ -1770,6 +1772,136 @@ mod tests {
             matched.log.iter().any(|l| l.contains("wrote")),
             "log must contain a 'wrote' line; log = {:?}",
             matched.log
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T5 race-fix: post-abandon cast receives Rejected with "abandoned" reason
+    //
+    // After Abandon closes the session, a Cast message arriving on the same
+    // connection must produce a Rejected response whose reason contains
+    // "abandoned". This proves the SessionAbandoned guard is wired through
+    // handle_client_msg → submit_verdict → ServerMsg::Rejected.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn post_abandon_cast_receives_rejected() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+
+        let server_for_agent = server.clone();
+        tokio::spawn(crate::agent::run_agent(agent, server_for_agent));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        // Split client A into read/write. We keep the read side live so we
+        // can inspect Rejected messages sent back to A.
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+
+        // B's read side is only drained (we don't need to inspect B's messages).
+        drain_client(BufReader::new(cb_read)).await;
+
+        // Wrap A's read side so we can call read_json on it.
+        let mut ca_reader = BufReader::new(ca_read);
+
+        // Send Hello from both
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 })
+            .await.unwrap();
+
+        // Drain incoming server messages on A until DispatchReady.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Wait for a gate.
+        let state_with_gate = tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            s.gate.is_some()
+        })).await.expect("gate");
+
+        let wire_gate = state_with_gate.gate.unwrap();
+        let gate_id = wire_gate.gate_id.clone();
+        let diff_hash = wire_gate.diff_hash;
+
+        // A sends Abandon.
+        write_json(&mut ca_write, &ClientMsg::Abandon).await.unwrap();
+
+        // Wait for the session to close.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| {
+            matches!(s.phase, WirePhase::Closed { .. })
+        })).await.expect("Closed after Abandon");
+
+        // Drain all outstanding state messages from A's read side so we can
+        // spot the Rejected response to the upcoming Cast.
+        // (The writer task sends state snapshots; we want to get past them.)
+        let (drain_tx, mut drain_rx) = tokio::sync::mpsc::channel::<ServerMsg>(64);
+        let drain_tx_clone = drain_tx.clone();
+        tokio::spawn(async move {
+            while let Ok(Some(msg)) = read_json::<_, ServerMsg>(&mut ca_reader).await {
+                let _ = drain_tx_clone.send(msg).await;
+            }
+        });
+
+        // Now A casts on the abandoned gate — should produce a Rejected.
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Cast {
+                gate_id: gate_id.clone(),
+                verdict: cast_go(1, &gate_id, diff_hash),
+            },
+        ).await.unwrap();
+
+        // Wait for a Rejected message whose reason contains "abandoned".
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let mut got_rejected = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, drain_rx.recv()).await {
+                Ok(Some(ServerMsg::Rejected { reason })) if reason.contains("abandoned") => {
+                    got_rejected = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        assert!(
+            got_rejected,
+            "post-abandon Cast must produce Rejected with 'abandoned' in reason"
         );
     }
 }

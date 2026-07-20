@@ -19,4 +19,6 @@ pub enum GateHostError {
     Cast(#[from] CastRejected),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    #[error("session abandoned")]
+    SessionAbandoned,
 }

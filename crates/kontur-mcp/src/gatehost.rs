@@ -73,6 +73,14 @@ struct SessionState {
     /// (watch::send discards when there are zero receivers; keeping one here
     /// guarantees the channel is always live — same pattern as kontur-net).
     _plan_approved_rx: watch::Receiver<bool>,
+    /// Set by `abandon_session` under the state lock. Once `true`,
+    /// `submit_verdict`, `begin_task_gate`, `hand_edit`, and `propose_plan`
+    /// all return `Err(GateHostError::SessionAbandoned)` immediately.
+    ///
+    /// Coherence: a cast that beats the flag commits before discard → discard
+    /// resets to the new HEAD (harmless, audit coherent). A cast after the
+    /// flag is refused → no accept post-abandon.
+    abandoned: bool,
 }
 
 /// Owns session state behind a single lock and drives `kontur-core`.
@@ -95,6 +103,7 @@ impl GateHost {
                 plan: None,
                 plan_approved_tx,
                 _plan_approved_rx,
+                abandoned: false,
             })),
             workspace,
             events,
@@ -109,8 +118,11 @@ impl GateHost {
     /// Agent face: propose a plan (list of task descriptions). Stores the plan,
     /// emits `HostEvent::PlanProposed`, and returns a watch receiver that flips
     /// to `true` when both operators approve. Re-proposal overwrites (idempotent).
-    pub async fn propose_plan(&self, tasks: Vec<String>) -> watch::Receiver<bool> {
+    pub async fn propose_plan(&self, tasks: Vec<String>) -> Result<watch::Receiver<bool>, GateHostError> {
         let mut st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
         // BUG CLASS: approval state lifetime must match proposal, not session.
         // Create a fresh watch channel on each proposal. Prior subscribers are
         // closed (their changed() errors), correctly surfacing "plan superseded".
@@ -128,7 +140,7 @@ impl GateHost {
         let rx = st.plan_approved_tx.subscribe();
         drop(st);
         let _ = self.events.send(HostEvent::PlanProposed { tasks });
-        rx
+        Ok(rx)
     }
 
     /// Operator face: mark the proposed plan as approved, unblocking any
@@ -199,6 +211,9 @@ impl GateHost {
     /// discards the task and publishes the new state on the gate's watch.
     pub async fn submit_verdict(&self, gate_id: &GateId, cv: CastVerdict) -> Result<GateProgress, GateHostError> {
         let mut st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
         let idx = st
             .holds
             .iter()
@@ -278,6 +293,9 @@ impl GateHost {
         let dh = diff_hash(&frozen);
         let provenance = {
             let st = self.state.lock().await;
+            if st.abandoned {
+                return Err(GateHostError::SessionAbandoned);
+            }
             build_provenance(&st.ctx, &task_id, dh, &frozen, tokens)
         };
         Ok(self.open_gate(task_id, provenance).await)
@@ -330,6 +348,12 @@ impl GateHost {
         contents: &[u8],
         editor: OperatorId,
     ) -> Result<(GateId, watch::Receiver<HoldState>), GateHostError> {
+        {
+            let st = self.state.lock().await;
+            if st.abandoned {
+                return Err(GateHostError::SessionAbandoned);
+            }
+        }
         self.workspace.apply_write(&task_id, path, contents)?;
         let frozen = self.workspace.freeze_task_diff(&task_id)?;
         let dh = diff_hash(&frozen);
@@ -383,9 +407,17 @@ impl GateHost {
     /// Operator kill-switch: discard all pending (Open/Partial) tasks and emit
     /// `SessionAbandoned`. Already-resolved gates keep their audit records.
     /// Nothing is merged.
+    ///
+    /// Coherence: `abandoned` is set to `true` under the state lock before
+    /// discards run. A concurrent `submit_verdict` that beats the flag commits
+    /// before `discard_task` runs → `discard_task` resets the worktree to the
+    /// new HEAD (harmless, audit coherent). A `submit_verdict` that loses the
+    /// race observes `abandoned = true` and returns `Err(SessionAbandoned)` →
+    /// no accept post-abandon.
     pub async fn abandon_session(&self) -> Result<(), GateHostError> {
         let task_ids: Vec<TaskId> = {
-            let st = self.state.lock().await;
+            let mut st = self.state.lock().await;
+            st.abandoned = true;
             st.holds
                 .iter()
                 .filter(|e| matches!(e.hold.state(), HoldState::Open | HoldState::Partial))
@@ -730,7 +762,7 @@ mod tests {
         let mut ev_rx = host.subscribe_events();
 
         let tasks = vec!["add caching".to_string(), "write tests".to_string()];
-        let mut rx = host.propose_plan(tasks.clone()).await;
+        let mut rx = host.propose_plan(tasks.clone()).await.unwrap();
 
         // proposed_plan() returns the tasks.
         assert_eq!(host.proposed_plan().await, Some(tasks.clone()));
@@ -791,8 +823,8 @@ mod tests {
         let ws = Arc::new(InMemoryWorkspace::new());
         let host = GateHost::new(ctx(vec![op1, op2]), ws);
 
-        host.propose_plan(vec!["task-a".to_string()]).await;
-        host.propose_plan(vec!["task-b".to_string(), "task-c".to_string()]).await;
+        host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
+        host.propose_plan(vec!["task-b".to_string(), "task-c".to_string()]).await.unwrap();
 
         // Re-proposal overwrites.
         assert_eq!(
@@ -811,7 +843,7 @@ mod tests {
         let host = GateHost::new(ctx(vec![op1, op2]), ws);
 
         // Propose plan A and approve it.
-        let mut rx1 = host.propose_plan(vec!["task-a".to_string()]).await;
+        let mut rx1 = host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
         host.approve_plan().await;
 
         // The original receiver sees true.
@@ -819,7 +851,7 @@ mod tests {
         assert!(*rx1.borrow_and_update(), "original rx must see true after approve");
 
         // Re-propose plan B: fresh watch channel, state reset to false.
-        let mut rx2 = host.propose_plan(vec!["task-b".to_string()]).await;
+        let mut rx2 = host.propose_plan(vec!["task-b".to_string()]).await.unwrap();
         assert!(!*rx2.borrow(), "re-proposal must reset approval to false");
 
         // The old receiver's changed() now errors (channel closed by the swap).
@@ -892,5 +924,91 @@ mod tests {
         let resolved_pos = events.iter().position(|e| matches!(e, HostEvent::GateResolved { state: HoldState::Satisfied, .. })).unwrap();
         assert!(write_pos < opened_pos, "Write must precede GateOpened");
         assert!(opened_pos < resolved_pos, "GateOpened must precede GateResolved");
+    }
+
+    // -----------------------------------------------------------------------
+    // T5 race-fix tests
+    // -----------------------------------------------------------------------
+
+    /// After `abandon_session`, a second `submit_verdict` must be refused with
+    /// `SessionAbandoned`; the audit chain must be unchanged from before abandon,
+    /// and the task must have been discarded.
+    #[tokio::test]
+    async fn casts_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+
+        // First go cast — gate moves to Partial.
+        let p1 = host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        assert_eq!(p1.state, HoldState::Partial);
+
+        let audit_before = host.audit_len().await;
+
+        // Abandon — discards the task.
+        host.abandon_session().await.unwrap();
+        assert_eq!(ws.discarded_tasks(), vec![TaskId("t1".into())]);
+
+        // Second go cast after abandon must fail.
+        let err = host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+
+        // Audit chain must be unchanged (no records added after abandon).
+        assert_eq!(host.audit_len().await, audit_before);
+    }
+
+    /// After `abandon_session`, calling `begin_task_gate` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn begin_task_gate_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        host.abandon_session().await.unwrap();
+
+        // Seed a task write so the workspace can freeze it.
+        let task = TaskId("t2".into());
+        ws.apply_write(&task, "b.rs", b"y\n").unwrap();
+
+        let err = host.begin_task_gate(task, 10).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+    }
+
+    /// After `abandon_session`, calling `hand_edit` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn hand_edit_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws.clone());
+
+        host.abandon_session().await.unwrap();
+
+        let task = TaskId("t1".into());
+        let err = host.hand_edit(task, "a.rs", b"x\n", op1).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
+    }
+
+    /// After `abandon_session`, calling `propose_plan` must return
+    /// `Err(GateHostError::SessionAbandoned)`.
+    #[tokio::test]
+    async fn propose_plan_refused_after_abandon() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        host.abandon_session().await.unwrap();
+
+        let err = host.propose_plan(vec!["task-a".to_string()]).await.unwrap_err();
+        assert_eq!(err, GateHostError::SessionAbandoned);
     }
 }
