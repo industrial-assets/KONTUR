@@ -5,12 +5,22 @@ use kontur_core::{
     DualHold, GateId, GateRecord, Hash, HoldState, MakerSet, OperatorId, Provenance, Remedy,
     TaskId, VerdictView,
 };
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{broadcast, watch, Mutex};
 
 use crate::error::GateHostError;
 use crate::provenance::build_provenance;
 use crate::session::SessionContext;
 use crate::workspace::{diff_hash, CommandOutput, Workspace};
+
+/// Live activity events for observers (the session server). Best-effort
+/// display stream — never blocks or gates the enforcement path.
+#[derive(Clone, Debug)]
+pub enum HostEvent {
+    Write { task: TaskId, path: String, bytes: usize },
+    Command { task: TaskId, command: String },
+    GateOpened { gate_id: GateId, task: TaskId },
+    GateResolved { gate_id: GateId, state: HoldState },
+}
 
 /// Result of a cast on the operator face.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -61,10 +71,12 @@ struct SessionState {
 pub struct GateHost {
     state: Arc<Mutex<SessionState>>,
     workspace: Arc<dyn Workspace>,
+    events: broadcast::Sender<HostEvent>,
 }
 
 impl GateHost {
     pub fn new(ctx: SessionContext, workspace: Arc<dyn Workspace>) -> Self {
+        let (events, _) = broadcast::channel(64);
         GateHost {
             state: Arc::new(Mutex::new(SessionState {
                 ctx,
@@ -73,18 +85,39 @@ impl GateHost {
                 next_gate: 0,
             })),
             workspace,
+            events,
         }
+    }
+
+    /// Subscribe to live host activity events (display-only, best-effort).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<HostEvent> {
+        self.events.subscribe()
+    }
+
+    /// The agent id for this session.
+    pub async fn agent_id(&self) -> String {
+        self.state.lock().await.ctx.agent_id.clone()
     }
 
     /// Agent face: record a worktree write on a task (not gated).
     pub async fn record_write(&self, task_id: &TaskId, path: &str, contents: &[u8]) -> Result<(), GateHostError> {
         self.workspace.apply_write(task_id, path, contents)?;
+        let _ = self.events.send(HostEvent::Write {
+            task: task_id.clone(),
+            path: path.to_owned(),
+            bytes: contents.len(),
+        });
         Ok(())
     }
 
     /// Agent face: run a command in the worktree (not gated).
     pub async fn run_command(&self, task_id: &TaskId, command: &str, cwd: &str) -> Result<CommandOutput, GateHostError> {
-        Ok(self.workspace.run_command(task_id, command, cwd)?)
+        let out = self.workspace.run_command(task_id, command, cwd)?;
+        let _ = self.events.send(HostEvent::Command {
+            task: task_id.clone(),
+            command: command.to_owned(),
+        });
+        Ok(out)
     }
 
     /// Open a gate over a task's frozen diff. Returns the gate id and a receiver
@@ -93,6 +126,7 @@ impl GateHost {
         let mut st = self.state.lock().await;
         st.next_gate += 1;
         let id = GateId(format!("gate-{:03}", st.next_gate));
+        let task_id_for_event = task_id.clone();
         let hold = DualHold::new(
             id.clone(),
             task_id,
@@ -103,6 +137,11 @@ impl GateHost {
         );
         let (tx, rx) = watch::channel(HoldState::Open);
         st.holds.push(HoldEntry { hold, provenance, watch_tx: tx, escalation_required: false });
+        drop(st);
+        let _ = self.events.send(HostEvent::GateOpened {
+            gate_id: id.clone(),
+            task: task_id_for_event,
+        });
         (id, rx)
     }
 
@@ -149,8 +188,17 @@ impl GateHost {
             _ => None,
         };
 
+        let escalation_required = st.holds[idx].escalation_required;
         let _ = st.holds[idx].watch_tx.send(state);
-        Ok(GateProgress { state, escalation_required: st.holds[idx].escalation_required, remedy })
+        let gate_id_for_event = gate_id.clone();
+        drop(st);
+        if matches!(state, HoldState::Satisfied | HoldState::Blocked) {
+            let _ = self.events.send(HostEvent::GateResolved {
+                gate_id: gate_id_for_event,
+                state,
+            });
+        }
+        Ok(GateProgress { state, escalation_required, remedy })
     }
 
     /// Verify the whole audit chain (tamper-evidence check).
@@ -239,6 +287,7 @@ impl GateHost {
         let mut st = self.state.lock().await;
         st.next_gate += 1;
         let id = GateId(format!("gate-{:03}", st.next_gate));
+        let task_id_for_event = task_id.clone();
         let provenance = build_provenance(&st.ctx, &task_id, dh, &frozen, 0);
         let hold = DualHold::reopen_handedit(
             id.clone(),
@@ -253,6 +302,11 @@ impl GateHost {
         let (tx, rx) = watch::channel(hold.state());
         let escalation_required = hold.escalation_required();
         st.holds.push(HoldEntry { hold, provenance, watch_tx: tx, escalation_required });
+        drop(st);
+        let _ = self.events.send(HostEvent::GateOpened {
+            gate_id: id.clone(),
+            task: task_id_for_event,
+        });
         Ok((id, rx))
     }
 
@@ -521,5 +575,64 @@ mod tests {
 
         assert_eq!(host.audit_len().await, 2);
         assert!(host.verify_audit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn event_stream_write_gate_opened_gate_resolved() {
+        use std::time::Duration;
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+
+        let mut rx = host.subscribe_events();
+
+        // Record a write → Write event.
+        let task = TaskId("t1".into());
+        host.record_write(&task, "a.rs", b"hello\n").await.unwrap();
+
+        // Open a gate via begin_task_gate → GateOpened event.
+        let (gid, _watch_rx) = host.begin_task_gate(task.clone(), 10).await.unwrap();
+        let dh = host.pending_gates().await[0].diff_hash;
+
+        // Cast two go verdicts → GateResolved{Satisfied} event.
+        host.submit_verdict(&gid, go_verdict(1, &gid, dh)).await.unwrap();
+        host.submit_verdict(&gid, go_verdict(2, &gid, dh)).await.unwrap();
+
+        // Collect all events with a short timeout so we don't wait forever.
+        let mut events: Vec<HostEvent> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        loop {
+            match rx.try_recv() {
+                Ok(ev) => events.push(ev),
+                Err(TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(TryRecvError::Closed) => break,
+                Err(TryRecvError::Lagged(_)) => break,
+            }
+        }
+
+        // Assert the sequence contains: Write → GateOpened → GateResolved{Satisfied}
+        let has_write = events.iter().any(|e| matches!(e, HostEvent::Write { path, .. } if path == "a.rs"));
+        let has_gate_opened = events.iter().any(|e| matches!(e, HostEvent::GateOpened { .. }));
+        let has_resolved = events.iter().any(|e| matches!(e, HostEvent::GateResolved { state: HoldState::Satisfied, .. }));
+
+        assert!(has_write, "expected Write event; got: {events:?}");
+        assert!(has_gate_opened, "expected GateOpened event; got: {events:?}");
+        assert!(has_resolved, "expected GateResolved(Satisfied) event; got: {events:?}");
+
+        // Verify ordering: Write before GateOpened before GateResolved.
+        let write_pos = events.iter().position(|e| matches!(e, HostEvent::Write { .. })).unwrap();
+        let opened_pos = events.iter().position(|e| matches!(e, HostEvent::GateOpened { .. })).unwrap();
+        let resolved_pos = events.iter().position(|e| matches!(e, HostEvent::GateResolved { state: HoldState::Satisfied, .. })).unwrap();
+        assert!(write_pos < opened_pos, "Write must precede GateOpened");
+        assert!(opened_pos < resolved_pos, "GateOpened must precede GateResolved");
     }
 }

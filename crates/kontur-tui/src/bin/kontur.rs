@@ -190,7 +190,14 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
     println!("  kontur join --addr 127.0.0.1:{} --seat A --seed {}", op_addr.port(), seeds[0]);
     println!("  kontur join --addr 127.0.0.1:{} --seat B --seed {}", op_addr.port(), seeds[1]);
     println!();
-    println!("  MCP agent: {{\"command\": \"nc\", \"args\": [\"localhost\", \"{}\"]}}",  agent_addr.port());
+    println!("  attach a real Claude Code as the agent:");
+    println!("    1. save as kontur-mcp.json:");
+    println!("       {{\"mcpServers\":{{\"kontur\":{{\"command\":\"nc\",\"args\":[\"127.0.0.1\",\"{}\"]}}}}}}",  agent_addr.port());
+    println!("    2. run: claude --mcp-config kontur-mcp.json \\");
+    println!("         -p \"Use ONLY the kontur MCP tools (write_file, run_command, propose_task_complete). Task t1: <your task>. When done call propose_task_complete with task_id t1 and wait for the review verdict.\"");
+    println!("    note: tool-level enforcement (blocking Claude Code's native file tools) is not");
+    println!("    yet wired; instruct the agent to use kontur tools, and review the diff — the");
+    println!("    gate itself is enforced server-side.");
     println!();
     println!("Press Ctrl-C to stop.");
 

@@ -59,16 +59,25 @@ cargo run -p kontur-tui --bin kontur -- join --addr host:7777 --seat A --seed 1
 cargo run -p kontur-tui --bin kontur -- join --addr host:7777 --seat B --seed 2
 ```
 
-The `host` command also binds an MCP endpoint (default port 7778). A real agent
-(Claude Code or compatible) connects via a stdio bridge such as:
+The `host` command also binds an MCP endpoint (default port 7778). A real Claude
+Code agent connects via a stdio bridge — save as `kontur-mcp.json`:
 
 ```json
-{"command": "nc", "args": ["localhost", "7778"]}
+{"mcpServers":{"kontur":{"command":"nc","args":["127.0.0.1","7778"]}}}
 ```
 
-The agent's `write_file` and `propose_task_complete` calls are gated — every
-task completion parks until both operators cast a verdict. Binding native Claude
-Code tool calls through this endpoint is the next integration step.
+Then run:
+
+```sh
+claude --mcp-config kontur-mcp.json \
+  -p "Use ONLY the kontur MCP tools (write_file, run_command, propose_task_complete). Task t1: <your task>. When done call propose_task_complete with task_id t1 and wait for the review verdict."
+```
+
+Agent writes, commands, and gate openings stream live into the operator console
+as they happen — no keypress needed. Every task completion parks at a four-eyes
+gate until both operators cast a verdict. Tool-level enforcement (blocking Claude
+Code's native file tools) is not yet wired; instruct the agent to use the kontur
+tools, and review the diff — the gate itself is enforced server-side.
 
 The design lives in:
 

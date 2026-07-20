@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, watch, Mutex};
 
 use kontur_core::{HoldState, OperatorId};
-use kontur_mcp::GateHost;
+use kontur_mcp::{GateHost, HostEvent};
 
 use crate::codec::{read_json, write_json};
 use crate::protocol::{ClientMsg, ServerMsg, WireFleetCard, WireGate, WirePhase, WireRole, WireSeat, WireState};
@@ -163,7 +163,7 @@ impl SessionServer {
             started: Instant::now(),
         };
 
-        SessionServer {
+        let server = SessionServer {
             inner: Arc::new(Inner {
                 host,
                 cfg,
@@ -171,6 +171,100 @@ impl SessionServer {
                 state_tx,
                 plan_tx,
             }),
+        };
+
+        // Spawn event pump: translates GateHost activity events into fleet card
+        // updates and log lines, then refreshes the console. This is what makes
+        // an externally-opened gate visible with no operator keypress.
+        {
+            let pump_server = server.clone();
+            tokio::spawn(async move {
+                let agent_id = pump_server.inner.host.agent_id().await;
+                let mut rx = pump_server.inner.host.subscribe_events();
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => pump_server.on_host_event(&agent_id, ev).await,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        server
+    }
+
+    async fn on_host_event(&self, agent_id: &str, ev: HostEvent) {
+        match ev {
+            HostEvent::Write { path, bytes, .. } => {
+                let card = WireFleetCard {
+                    id: agent_id.to_owned(),
+                    status: format!("write {path}"),
+                    tokens: 0,
+                    needs_signoff: false,
+                };
+                let mut net = self.inner.net.lock().await;
+                if let Some(existing) = net.fleet.iter_mut().find(|c| c.id == card.id) {
+                    existing.status = card.status;
+                    existing.needs_signoff = false;
+                } else {
+                    net.fleet.push(card);
+                }
+                push_log(&mut net, &format!("{agent_id} wrote {path} ({bytes}B)"));
+                drop(net);
+                self.refresh_locked().await;
+            }
+            HostEvent::Command { command, .. } => {
+                let truncated: String = command.chars().take(40).collect();
+                let card = WireFleetCard {
+                    id: agent_id.to_owned(),
+                    status: format!("run {truncated}"),
+                    tokens: 0,
+                    needs_signoff: false,
+                };
+                let mut net = self.inner.net.lock().await;
+                if let Some(existing) = net.fleet.iter_mut().find(|c| c.id == card.id) {
+                    existing.status = card.status;
+                    existing.needs_signoff = false;
+                } else {
+                    net.fleet.push(card);
+                }
+                push_log(&mut net, &format!("{agent_id} ran {truncated}"));
+                drop(net);
+                self.refresh_locked().await;
+            }
+            HostEvent::GateOpened { gate_id, .. } => {
+                let card = WireFleetCard {
+                    id: agent_id.to_owned(),
+                    status: "▶ needs sign-off".to_owned(),
+                    tokens: 0,
+                    needs_signoff: true,
+                };
+                let mut net = self.inner.net.lock().await;
+                if let Some(existing) = net.fleet.iter_mut().find(|c| c.id == card.id) {
+                    existing.status = card.status;
+                    existing.needs_signoff = true;
+                } else {
+                    net.fleet.push(card);
+                }
+                push_log(&mut net, &format!("gate {} parked at merge gate", gate_id.0));
+                drop(net);
+                self.refresh_locked().await;
+            }
+            HostEvent::GateResolved { gate_id, state } => {
+                // The Cast handler already logs the resolution detail; skip the
+                // log line here to avoid duplication. Just update the card.
+                let mut net = self.inner.net.lock().await;
+                if let Some(existing) = net.fleet.iter_mut().find(|c| c.id == agent_id) {
+                    existing.status = "working".to_owned();
+                    existing.needs_signoff = false;
+                }
+                drop(net);
+                // Still refresh so the fleet card update reaches clients.
+                let _ = state; // acknowledged, cast handler logs it
+                let _ = gate_id;
+                self.refresh_locked().await;
+            }
         }
     }
 
@@ -1330,6 +1424,65 @@ mod tests {
             closed_count, 1,
             "expected exactly one 'session closed' log entry, got {closed_count}: {:?}",
             closed_state.log
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 5: external_agent_activity_streams_without_operator_action
+    //
+    // Verifies that calling host.record_write and host.begin_task_gate
+    // directly (exactly as the MCP KonturServer handler does) causes the
+    // console to refresh — specifically: the WireState watch advances to a
+    // state where gate.is_some() AND the log contains a "wrote" line, with
+    // NO operator client messages sent after the initial Hello.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn external_agent_activity_streams_without_operator_action() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["t1".into()]);
+        let mut state_rx = server.state_rx();
+
+        // Attach ONE duplex operator client for Hello only.
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        drain_client(BufReader::new(ca_read)).await;
+
+        // Send Hello — phase stays AwaitOperators / DispatchReady (only one seat).
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 })
+            .await
+            .unwrap();
+
+        // Allow the Hello to be processed.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Directly call the host methods that the MCP KonturServer handler calls.
+        let task = kontur_core::TaskId("t1".into());
+        server.host().record_write(&task, "main.rs", b"fn main() {}\n").await.unwrap();
+        server.host().begin_task_gate(task, 0).await.unwrap();
+
+        // Wait — without any further operator messages — for a WireState where
+        // gate.is_some() AND the log contains a "wrote" line. This proves the
+        // event pump refreshed the console without operator input.
+        let matched = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                s.gate.is_some()
+                    && s.log.iter().any(|l| l.contains("wrote"))
+            }),
+        )
+        .await
+        .expect("timed out waiting for gate + wrote log line without operator action");
+
+        assert!(matched.gate.is_some(), "gate must be present");
+        assert!(
+            matched.log.iter().any(|l| l.contains("wrote")),
+            "log must contain a 'wrote' line; log = {:?}",
+            matched.log
         );
     }
 }
