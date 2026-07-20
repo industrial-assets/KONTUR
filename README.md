@@ -4,6 +4,8 @@
 
 Two engineers, one console, a fleet of agents — and nothing ships without both keys.
 
+<img width="1135" height="836" alt="Screenshot 2026-07-20 at 11 50 28" src="https://github.com/user-attachments/assets/b62decff-a735-4616-b056-1dfa1d08eabd" />
+
 ---
 
 ## What it is
