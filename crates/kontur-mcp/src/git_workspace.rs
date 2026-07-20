@@ -131,6 +131,15 @@ impl Workspace for GitWorkspace {
         git(&self.repo, &["worktree", "remove", "--force", worktree_str])?;
         Ok(())
     }
+
+    fn read_file(&self, _task_id: &TaskId, path: &str) -> Result<Option<Vec<u8>>, WorkspaceError> {
+        let full = self.worktree.join(path);
+        match std::fs::read(&full) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(WorkspaceError::Io(e.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -204,5 +213,25 @@ mod tests {
         let repo = temp_repo();
         let ws = GitWorkspace::create(repo, "s3").unwrap();
         assert!(ws.freeze_task_diff(&TaskId("t".into())).is_err());
+    }
+
+    #[test]
+    fn read_file_returns_written_contents() {
+        let repo = temp_repo();
+        let ws = GitWorkspace::create(repo, "s-rf1").unwrap();
+        let t = TaskId("t1".into());
+        ws.apply_write(&t, "src/lib.rs", b"pub fn f() {}\n").unwrap();
+        assert_eq!(
+            ws.read_file(&t, "src/lib.rs").unwrap(),
+            Some(b"pub fn f() {}\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn read_file_returns_none_for_missing_path() {
+        let repo = temp_repo();
+        let ws = GitWorkspace::create(repo, "s-rf2").unwrap();
+        let t = TaskId("t1".into());
+        assert_eq!(ws.read_file(&t, "does_not_exist.rs").unwrap(), None);
     }
 }

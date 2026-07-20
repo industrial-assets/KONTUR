@@ -406,6 +406,19 @@ impl GateHost {
         self.state.lock().await.chain.records().len()
     }
 
+    /// Read the current on-disk contents of a file in the task's worktree.
+    /// Returns `Ok(None)` when the path does not exist (new file).
+    /// Refused when the session has been abandoned — same guard as other
+    /// mutating/reading operations.
+    pub async fn read_file(&self, task_id: &TaskId, path: &str) -> Result<Option<Vec<u8>>, GateHostError> {
+        let st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
+        drop(st);
+        Ok(self.workspace.read_file(task_id, path)?)
+    }
+
     /// Session-end: land the approved work as one reviewed commit.
     pub async fn merge_session(&self, message: &str) -> Result<(), GateHostError> {
         Ok(self.workspace.merge_session(message)?)

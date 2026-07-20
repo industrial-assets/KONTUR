@@ -107,6 +107,15 @@ impl Workspace for FsWorkspace {
         *self.merged.lock().unwrap() = Some(message.to_string());
         Ok(())
     }
+
+    fn read_file(&self, _task_id: &TaskId, path: &str) -> Result<Option<Vec<u8>>, WorkspaceError> {
+        let full = self.root.join(path);
+        match std::fs::read(&full) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(WorkspaceError::Io(e.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +172,24 @@ mod tests {
         assert!(ws.merged_message().is_none());
         ws.merge_session("kontur session\n\nReviewed-by: A").unwrap();
         assert_eq!(ws.merged_message(), Some("kontur session\n\nReviewed-by: A".to_string()));
+    }
+
+    #[test]
+    fn read_file_returns_written_contents() {
+        let root = temp_root();
+        let ws = FsWorkspace::new(root.clone());
+        let task = TaskId("t1".into());
+        ws.apply_write(&task, "src/lib.rs", b"fn f() {}\n").unwrap();
+        assert_eq!(
+            ws.read_file(&task, "src/lib.rs").unwrap(),
+            Some(b"fn f() {}\n".to_vec())
+        );
+    }
+
+    #[test]
+    fn read_file_returns_none_for_missing_path() {
+        let ws = FsWorkspace::new(temp_root());
+        let task = TaskId("t1".into());
+        assert_eq!(ws.read_file(&task, "nope.rs").unwrap(), None);
     }
 }

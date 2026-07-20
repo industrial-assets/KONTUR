@@ -293,6 +293,10 @@ pub async fn run_remote(
                     let _ = rej_tx.send(reason).await;
                 }
                 ServerMsg::Welcome { .. } => {}
+                // FileContent responses are correlated by path at the TUI layer
+                // (future: route into a pending fetch map). For now, ignore —
+                // the fetch-file TUI integration is a separate slice.
+                ServerMsg::FileContent { .. } => {}
             }
         }
     });
