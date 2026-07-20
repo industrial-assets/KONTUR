@@ -19,7 +19,7 @@ Pair programming assumed a driver at the keyboard and a navigator watching the c
 ## How it works
 
 - **Confirm the prompt.** Both seats see the instruction and mark ready before it dispatches.
-- **Plan first.** The agent returns a task list of bounded, single-concern changes. Both operators approve the plan before a line is written.
+- **Plan first.** The agent returns a task list of bounded, single-concern changes. Both seats approve the plan before a line is written.
 - **One task at a time.** Agents work sequentially; each finished change parks at a gate.
 - **Two keys, independent.** On high-risk gates the first verdict is sealed until the second is cast — no anchoring, no rubber-stamp. A no-go must carry its fix. A hand-edit applies instantly for emergencies but still needs both keys before it merges.
 - **Merge with a trail.** The approved set lands as one reviewed commit carrying `Reviewed-by` trailers and a link to a hash-chained audit record.
@@ -32,8 +32,8 @@ Pair programming assumed a driver at the keyboard and a navigator watching the c
  │ analysing parser.py · 3.1k tok│ │ editing auth │ │ ▶ NEEDS SIGN-OFF│
  └───────────────────────────────┘ └──────────────┘ └─────────────────┘
  ┌─ GATE-03 · agent-03 · auth/session.ts · +47 -12 · tests ok ────────┐
- │  KEY A  you / drv       □ awaiting your verdict                    │
- │  KEY B  j.reed / nav    ■ cast — sealed                           │
+ │  KEY A  HOST · you      □ awaiting your verdict                    │
+ │  KEY B  OPERATOR j.reed ■ cast — sealed                           │
  │  [g] go   [r] no-go +remedy   [e] hand-edit   [d] discuss          │
  └────────────────────────────────────────────────────────────────────┘
 ```
@@ -45,10 +45,14 @@ Brutalist: raw, structural, honest. Every element on screen earns its place or i
 ## Running it
 
 ```sh
-# Zero-config: host in your current git repo (prints an invite link, opens your console):
+# Install (from a clone of this repo):
+cargo install --path crates/kontur-tui
+
+# Zero-config: host in your current git repo — your terminal becomes the HOST console,
+# with the invite shown in-console until the operator links ([l] toggles LAN/WAN link):
 cd your-project && kontur
 
-# Operator: paste the invite link printed by the host:
+# Operator: paste the invite link the host sends you:
 kontur join kontur://…
 
 # Self-contained local demo (both seats, scripted agent, in-memory workspace):
