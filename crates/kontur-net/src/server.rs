@@ -273,6 +273,21 @@ impl SessionServer {
                 let _ = gate_id;
                 self.refresh_locked().await;
             }
+            HostEvent::GateSuperseded { old_gate_id, new_gate_id } => {
+                // The stale pending hold has been removed; the fresh gate now
+                // carries the combined diff. Log and refresh so the wire
+                // projects the fresh gate immediately — realtime property.
+                let mut net = self.inner.net.lock().await;
+                push_log(
+                    &mut net,
+                    &format!(
+                        "gate {} superseded by hand-edit → {}",
+                        old_gate_id.0, new_gate_id.0
+                    ),
+                );
+                drop(net);
+                self.refresh_locked().await;
+            }
             HostEvent::PlanProposed { tasks } => {
                 let n = tasks.len();
                 let mut net = self.inner.net.lock().await;
@@ -679,6 +694,62 @@ async fn handle_client_msg(
 
             server.refresh_locked().await;
         }
+        ClientMsg::FetchFile { path } => {
+            // Requires an active pending gate — the file belongs to the task
+            // under review. Same guard as HandEdit.
+            let pending = server.inner.host.pending_gates().await;
+            if pending.is_empty() {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "no active gate — nothing to fetch".into(),
+                    })
+                    .await;
+                return;
+            }
+            let task_id = pending[0].task_id.clone();
+            match server.inner.host.read_file(&task_id, &path).await {
+                Err(e) => {
+                    let _ = conn_tx
+                        .send(ServerMsg::Rejected { reason: e.to_string() })
+                        .await;
+                }
+                Ok(maybe_bytes) => {
+                    match maybe_bytes {
+                        None => {
+                            // File does not exist in the worktree (new file).
+                            let _ = conn_tx
+                                .send(ServerMsg::FileContent { path, contents: None })
+                                .await;
+                        }
+                        Some(bytes) => {
+                            match std::str::from_utf8(&bytes) {
+                                Ok(text) => {
+                                    let _ = conn_tx
+                                        .send(ServerMsg::FileContent {
+                                            path,
+                                            contents: Some(text.to_owned()),
+                                        })
+                                        .await;
+                                }
+                                Err(_) => {
+                                    // Binary file: cannot round-trip through a text editor.
+                                    // Send FileContent with contents: None AND a Rejected
+                                    // notice so the operator knows to hand-edit on the host.
+                                    let _ = conn_tx
+                                        .send(ServerMsg::FileContent { path: path.clone(), contents: None })
+                                        .await;
+                                    let _ = conn_tx
+                                        .send(ServerMsg::Rejected {
+                                            reason: "binary file — hand-edit on the host machine".into(),
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ClientMsg::Bye => {
             // Reader task will handle disconnect naturally when the stream closes
         }
@@ -854,12 +925,26 @@ impl SessionServer {
         let gate = {
             let pending = inner.host.pending_gates().await;
             if let Some(gv) = pending.first() {
-                let diff_preview = inner
+                // Wire sanity cap: diffs above 64 KiB are truncated so a
+                // single giant task cannot exhaust the connection buffer.
+                // Operators who need the full diff can fetch it with FetchFile.
+                // diff_truncated is set when the cap fires so the TUI can warn
+                // the operator before accepting their go on a partial diff.
+                const DIFF_PREVIEW_CAP: usize = 64 * 1024;
+                let (diff_preview, diff_truncated) = inner
                     .host
                     .gate_diff(&gv.gate_id)
                     .await
                     .and_then(|bytes| String::from_utf8(bytes).ok())
-                    .map(|s| s.chars().take(512).collect::<String>());
+                    .map(|s| {
+                        if s.chars().count() > DIFF_PREVIEW_CAP {
+                            let truncated: String = s.chars().take(DIFF_PREVIEW_CAP).collect();
+                            (Some(format!("{truncated}\n… (diff truncated)")), true)
+                        } else {
+                            (Some(s), false)
+                        }
+                    })
+                    .unwrap_or((None, false));
 
                 Some(WireGate {
                     gate_id: gv.gate_id.clone(),
@@ -870,6 +955,7 @@ impl SessionServer {
                     keys: gv.observed.clone(),
                     escalation_required: gv.escalation_required,
                     diff_preview,
+                    diff_truncated,
                 })
             } else {
                 None
@@ -2127,5 +2213,190 @@ mod tests {
             }
         }
         assert!(got_empty_rejected, "empty SetPrompt must produce Rejected with 'empty' in reason");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: hand_edit_realtime_diff_sync
+    //
+    // After a HandEdit over the wire (fix: stale pending gate is superseded):
+    //   1. The server broadcasts a state update to ALL seats (realtime property).
+    //   2. The stale original gate is removed; ONLY the fresh hand-edit gate
+    //      remains in pending_gates.
+    //   3. BOTH seats' next WireState carries the new gate_id AND a diff_preview
+    //      containing the edited content — proving the wire projects the fresh
+    //      gate, not the stale one.
+    //   4. The hand-edit content is in the workspace immediately.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn hand_edit_realtime_diff_sync() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx_a = server.state_rx();
+        let mut state_rx_b = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// original\n".into(),
+            }],
+        };
+        tokio::spawn(crate::agent::run_agent(agent, server.clone()));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 }).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Hello { seat: "B".into(), operator: op2 }).await.unwrap();
+
+        // Drive through to Executing.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_a, |s| {
+            matches!(s.phase, WirePhase::DispatchReady { .. })
+        })).await.expect("DispatchReady");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_a, |s| {
+            matches!(s.phase, WirePhase::PlanReview { .. })
+        })).await.expect("PlanReview");
+
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_a, |s| {
+            matches!(s.phase, WirePhase::Executing)
+        })).await.expect("Executing");
+
+        // Wait for the first gate (opened by the scripted agent).
+        let state_with_gate = tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_a, |s| {
+            s.gate.is_some()
+        })).await.expect("first gate");
+        let original_gate_id = state_with_gate.gate.as_ref().unwrap().gate_id.clone();
+
+        // A sends HandEdit.
+        let edit_contents = "// edited by hand\npub fn guard() { todo!() }\n";
+        write_json(&mut ca_write, &ClientMsg::HandEdit {
+            path: "src/guard.rs".into(),
+            contents: edit_contents.into(),
+        }).await.unwrap();
+
+        // Realtime property: BOTH seats receive a broadcast where the wire
+        // projects the FRESH gate (not the stale original), and the
+        // diff_preview contains the edited content.
+        let fresh_gate_check = |s: &WireState| {
+            s.gate.as_ref().map(|g| {
+                g.gate_id != original_gate_id
+                    && g.diff_preview.as_deref().map(|d| d.contains("edited by hand")).unwrap_or(false)
+            }).unwrap_or(false)
+        };
+
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_a, fresh_gate_check))
+            .await.expect("A: wire projects fresh gate with edited content after hand-edit");
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx_b, fresh_gate_check))
+            .await.expect("B: wire projects fresh gate with edited content after hand-edit");
+
+        // After supersession: ONLY the fresh gate remains pending (stale removed).
+        let pending = server.inner.host.pending_gates().await;
+        assert_eq!(pending.len(), 1, "only the fresh hand-edit gate must remain pending");
+        assert_ne!(pending[0].gate_id, original_gate_id, "fresh gate must have a new id");
+
+        // The workspace holds the hand-edit content immediately.
+        let task = kontur_core::TaskId("t1".into());
+        let new_bytes = ws.file_contents(&task, "src/guard.rs").expect("file must be recorded");
+        assert!(
+            new_bytes.windows(b"edited by hand".len()).any(|w| w == b"edited by hand"),
+            "workspace must reflect hand-edit content"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: fetch_file_roundtrip
+    //
+    // After writing a file via host.record_write + begin_task_gate, seat A
+    // sends FetchFile for that path and receives FileContent with the correct
+    // contents. Fetching a missing path returns FileContent { contents: None }.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_file_roundtrip() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, ws) = make_server(op1, op2, vec!["t1".into()]);
+        let mut state_rx = server.state_rx();
+
+        // Write a file directly via the host (simulates MCP agent write).
+        let task = kontur_core::TaskId("t1".into());
+        server.host().record_write(&task, "main.rs", b"fn main() {}\n").await.unwrap();
+        server.host().begin_task_gate(task.clone(), 0).await.unwrap();
+
+        // Attach one client.
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+
+        // Split — keep the read side live for FetchFile responses.
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<ServerMsg>(64);
+        let msg_tx2 = msg_tx.clone();
+        tokio::spawn(async move {
+            let mut r = BufReader::new(ca_read);
+            while let Ok(Some(msg)) = read_json::<_, ServerMsg>(&mut r).await {
+                let _ = msg_tx2.send(msg).await;
+            }
+        });
+
+        // Send Hello (only one seat — that's fine for this test).
+        write_json(&mut ca_write, &ClientMsg::Hello { seat: "A".into(), operator: op1 }).await.unwrap();
+
+        // Wait for the gate to be visible in state.
+        tokio::time::timeout(Duration::from_secs(5), wait_for_state(&mut state_rx, |s| s.gate.is_some()))
+            .await.expect("gate visible");
+
+        // --- Test 1: fetch an existing file ---
+        write_json(&mut ca_write, &ClientMsg::FetchFile { path: "main.rs".into() }).await.unwrap();
+
+        let file_content = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match msg_rx.recv().await {
+                    Some(ServerMsg::FileContent { path, contents }) => return (path, contents),
+                    Some(_) => continue,
+                    None => panic!("channel closed"),
+                }
+            }
+        }).await.expect("FileContent for main.rs");
+
+        assert_eq!(file_content.0, "main.rs");
+        assert_eq!(file_content.1.as_deref(), Some("fn main() {}\n"),
+            "contents must match what was written");
+
+        // --- Test 2: fetch a missing path → None ---
+        write_json(&mut ca_write, &ClientMsg::FetchFile { path: "does_not_exist.rs".into() }).await.unwrap();
+
+        let missing_content = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match msg_rx.recv().await {
+                    Some(ServerMsg::FileContent { path, contents }) => return (path, contents),
+                    Some(_) => continue,
+                    None => panic!("channel closed"),
+                }
+            }
+        }).await.expect("FileContent for missing path");
+
+        assert_eq!(missing_content.0, "does_not_exist.rs");
+        assert!(missing_content.1.is_none(), "missing path must return None contents");
+
+        // Verify the workspace recorded the write.
+        assert_eq!(ws.file_contents(&task, "main.rs"), Some(b"fn main() {}\n".to_vec()));
     }
 }

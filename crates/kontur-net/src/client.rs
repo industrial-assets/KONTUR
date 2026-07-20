@@ -165,6 +165,14 @@ impl SessionClient {
         self.send(ClientMsg::SetPrompt { prompt: prompt.to_owned() }).await
     }
 
+    /// Request the current worktree contents of a file. The response arrives
+    /// as `ServerMsg::FileContent` on the normal server-message stream; the
+    /// TUI correlates by path. Fire-and-forget: the caller reads the response
+    /// from the receiver it obtained at `attach` time.
+    pub async fn fetch_file(&self, path: &str) -> io::Result<()> {
+        self.send(ClientMsg::FetchFile { path: path.to_owned() }).await
+    }
+
     /// Sign a Go verdict against the gate described by `wire_gate` and send it.
     pub async fn cast_go(&self, gate: &WireGate, depth: ReviewDepth) -> io::Result<()> {
         let verdict = self.build_verdict(gate, Verdict::Go, depth);

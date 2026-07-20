@@ -18,6 +18,9 @@ pub enum ClientMsg {
     Abandon,
     Bye,
     SetPrompt { prompt: String },
+    /// Request the current on-disk contents of a worktree file.
+    /// Response arrives as `ServerMsg::FileContent` on the same connection.
+    FetchFile { path: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -25,6 +28,10 @@ pub enum ServerMsg {
     Welcome { seat: String },
     State(Box<WireState>),
     Rejected { reason: String },
+    /// Reply to `ClientMsg::FetchFile`.  `contents` is `None` when the path
+    /// does not exist in the worktree (new file) or the file is binary (binary
+    /// round-trip via text editor is out of scope; edit locally on the host).
+    FileContent { path: String, contents: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -67,6 +74,9 @@ pub struct WireGate {
     pub keys: Vec<VerdictView>,
     pub escalation_required: bool,
     pub diff_preview: Option<String>,
+    /// True when `diff_preview` was capped at 64 KiB. Operators who approve
+    /// a truncated diff must explicitly acknowledge before their `go` is cast.
+    pub diff_truncated: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
