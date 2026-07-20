@@ -21,7 +21,7 @@ Pair programming assumed a driver at the keyboard and a navigator watching the c
 ## How it works
 
 - **Compose the prompt.** Either seat drafts/edits it in-console ([p]); every edit resets both ready marks; both mark ready to dispatch.
-- **Plan first.** The agent returns a task list of bounded, single-concern changes. Both seats approve the plan before a line is written.
+- **Plan first.** The agent proposes its task list of bounded, single-concern changes and is blocked until both seats approve it — the plan gate is enforced, not advisory.
 - **One task at a time.** Agents work sequentially; each finished change parks at a gate.
 - **Two keys, independent.** On high-risk gates the first verdict is sealed until the second is cast — no anchoring, no rubber-stamp. A no-go must carry its fix. A hand-edit applies instantly for emergencies but still needs both keys before it merges.
 - **Merge with a trail.** The approved set lands as one reviewed commit carrying `Reviewed-by` trailers and a link to a hash-chained audit record.
@@ -50,35 +50,44 @@ Brutalist: raw, structural, honest. Every element on screen earns its place or i
 # Install (from a clone of this repo):
 cargo install --path crates/kontur-tui
 
-# Zero-config: host in your current git repo — your terminal becomes the HOST console,
-# with the invite shown in-console until the operator links ([l] toggles LAN/WAN link):
-cd your-project && kontur
+# Primary path — host in your current git repo with a real Claude Code agent.
+# Your terminal becomes the HOST console; the invite shows in-console until the
+# operator links ([l] toggles LAN/WAN); compose the instruction at the dispatch
+# gate with [p]:
+cd your-project && kontur --claude
 
-# Operator: paste the invite link the host sends you:
+# Operator: paste the invite the host sends you (one 52-char code — it carries
+# a derived operator key and the pinned TLS cert fingerprint):
 kontur join kontur://…
+
+# Host without an agent (attach one manually later), or with the scripted demo agent:
+cd your-project && kontur
+cd your-project && kontur --demo-agent
 
 # Self-contained local demo (both seats, scripted agent, in-memory workspace):
 cargo run -p kontur-tui --bin kontur -- demo
 
-# Host a real session on a git repo with a scripted demo agent:
-cargo run -p kontur-tui --bin kontur -- host --repo /path/to/repo --demo-agent
+# Explicit repo / in-memory / scripted flags still work:
+kontur host --repo /path/to/repo --demo-agent
+kontur host --mem --prompt "initial text (editable in-console)" 
 
-# Host with a custom prompt and operator seeds (backward-compat, integer form):
-cargo run -p kontur-tui --bin kontur -- host --mem --prompt "add auth gate" --seeds 1,2
-
-# Join as operator (legacy --addr/--seed form still works):
-cargo run -p kontur-tui --bin kontur -- join --addr host:7777 --seed 2
+# Join as operator (legacy plain-TCP test form still works):
+kontur join --addr host:7777 --seed 2
 ```
 
-Invite links carry the operator's key — send privately; operator-supplied keys with host-side approval are future work.
+**Console keys:** `y` ready · `p` edit prompt · `o` open diff (required before `g`) ·
+`g` go · `r` no-go + steer · `e` hand-edit · `l` invite LAN/WAN · `k` abandon (confirm) · `q` quit.
+
+Invite codes carry the secret the operator's key is derived from — send privately; operator-supplied keys with host-side approval are future work.
 
 The `host` command also binds an MCP endpoint (default port 7778). Use `--claude`
 to have kontur spawn a permission-restricted Claude Code agent automatically once
 both seats approve the dispatch gate:
 
 ```sh
-# Primary path — kontur spawns the agent for you:
-kontur host --prompt "add auth module" --claude
+# kontur spawns the agent once both seats approve the dispatch gate; the
+# instruction is whatever was composed in-console at that gate:
+kontur --claude
 
 # The agent launches with native file/shell tools denied at CC's permission level;
 # only mcp__kontur__* tools are allowed. Output goes to a session log (path printed
@@ -101,11 +110,13 @@ claude --mcp-config kontur-mcp.json \
 
 Agent writes, commands, and gate openings stream live into the operator console
 as they happen — no keypress needed. Every task completion parks at a four-eyes
-gate until both operators cast a verdict. Enforcement is permission-level: native
-mutation tools are denied via CC's `--allowedTools`/`--disallowedTools` flags.
-Enforcement relies on Claude Code's own permission flags, not an OS-level sandbox.
-The operator wire is TLS-encrypted with the cert pinned via the fingerprint embedded
-in the invite link.
+gate until both operators cast a verdict — and a `go` requires having actually
+opened the diff (`[o]`); the review depth is recorded truthfully in the signed
+verdict. Enforcement is permission-level — native mutation tools are denied via
+CC's `--allowedTools`/`--disallowedTools` flags, not an OS-level sandbox. The
+operator wire is TLS-encrypted, cert pinned via the invite code. Either seat can
+abandon a runaway session (`[k]`): nothing merges, the agent is stopped, and the
+audit chain keeps every resolved gate.
 
 The design lives in:
 

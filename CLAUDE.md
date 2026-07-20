@@ -44,10 +44,10 @@ The product's value *is* these properties. Never weaken, shortcut, or "simplify"
 
 ## Architecture (current direction)
 
-- **Enforcement plane: MCP.** Agents work through the hosted MCP server: `write_file`/`run_command` execute in the isolated worktree and are recorded (streamed live to the console); the **gated boundary is `propose_task_complete`**, which parks the task's frozen diff at a dual-hold until both keys resolve it. The two-signatory logic lives between MCP's pause and resume — MCP provides the primitive; the four-eyes hold is ours. Forcing a harness's *native* tools through this endpoint is future work (documented in the specs).
+- **Enforcement plane: MCP.** Agents work through the hosted MCP server: `write_file`/`run_command` execute in the isolated worktree and are recorded (streamed live to the console); the **gated boundary is `propose_task_complete`**, which parks the task's frozen diff at a dual-hold until both keys resolve it. The two-signatory logic lives between MCP's pause and resume — MCP provides the primitive; the four-eyes hold is ours. The agent also proposes its plan through a gated `propose_plan` call that blocks until both seats approve. Claude Code's native mutation tools are denied at spawn via its own permission flags (`--allowedTools`/`--disallowedTools`); an OS-level sandbox remains future work.
 - **Agent backend: Claude Code** (sole backend for MVP). Keep backend-specific glue behind a thin adapter so multi-backend stays possible later — but do not build multi-backend now. Enforcement relies on Claude Code's own permission flags, not an OS-level sandbox.
 - **Topology:** one shared host holds the repo and runs the fleet; the Host's terminal is itself a seat; the Operator attaches over the network. Each agent gets a **git worktree**; approved work accumulates on a session branch and **merges once at the end** as a single reviewed commit with `Reviewed-by:` trailers.
-- **Client:** a **text-based TUI**. Two seats, one shared authoritative state, with presence (claiming is future work). The Host connects an operator via a paste-able invite link (`kontur://ip:port/token`; the token is the operator's key — magic-link model; BYO keys with host approval are future work). The operator wire is TLS-encrypted with the cert pinned via the fingerprint embedded in the invite link.
+- **Client:** a **text-based TUI**. Two seats, one shared authoritative state, with presence (claiming is future work). The Host invites the operator with one 52-char code (`kontur://ip:port/<code>` = base32 of a 128-bit invite secret, from which the operator's key is derived, plus a 128-bit pinned TLS cert fingerprint — magic-link model; BYO keys with host approval are future work). The prompt is composed in-console at the dispatch gate ([p]); every edit resets both ready marks.
 
 ---
 
@@ -116,8 +116,8 @@ kontur join kontur://…
 # host a session (in-memory workspace; demo scripted agent)
 cargo run -p kontur-tui --bin kontur -- host --mem --demo-agent
 
-# host with a real Claude Code agent (primary path):
-cargo run -p kontur-tui --bin kontur -- host --prompt "add auth module" --claude
+# host with a real Claude Code agent (primary path); prompt composed in-console:
+cd your-project && kontur --claude
 # kontur spawns claude with --allowedTools mcp__kontur__* and --disallowedTools
 # Write Edit MultiEdit NotebookEdit Bash once both seats approve the dispatch gate.
 # Agent output goes to a session log (path printed on startup).
@@ -139,9 +139,9 @@ cargo run -p kontur-tui --bin kontur -- join --addr 127.0.0.1:7777 --seed 2
 
 ## Status & future work
 
-**Working today (v0.1):** the four-eyes engine (`kontur-core`), the MCP enforcement plane with real git effects (`kontur-mcp`), the two-seat networked session with live agent-activity streaming (`kontur-net`), and the console + `kontur` binary (`kontur-tui`). Zero-config hosting (`kontur` in a git repo), invite links with a LAN/WAN toggle, blind dual sign-off, no-go-with-steer, hand-edit, park-on-disconnect, blocked-and-satisfied gates both audited, session squash-merge with `Reviewed-by:` trailers.
+**Working today (v0.2):** the four-eyes engine (`kontur-core`), the MCP enforcement plane with real git effects (`kontur-mcp`), the two-seat networked session with live agent-activity streaming (`kontur-net`), and the console + `kontur` binary (`kontur-tui`). Zero-config hosting (`kontur` in a git repo); **real Claude Code as the agent** (`--claude`, permission-restricted at spawn); agent-proposed plan gate; in-console prompt entry (edits reset consent); compact 52-char invites (derived keys + pinned-TLS fingerprints) with a LAN/WAN toggle; blind dual sign-off; FR-24 (a `go` requires the opened diff; review depth signed truthfully); no-go-with-steer; hand-edit; park-on-disconnect; session kill-switch (`[k]`, agent stopped, nothing merges); blocked-and-satisfied gates both audited; session squash-merge with `Reviewed-by:` trailers.
 
-**Recorded future work** (see PRD §9/§13 for detail): audit-chain hardening (operator-side record replication + external chain-head anchoring via Rekor/OpenTimestamps/RFC 3161 — a deliberate non-blockchain decision, reasoning in PRD §9); operator-supplied keys with host-side approval (replacing magic-link invites); forcing Claude Code's native tools through the MCP endpoint; live prompt co-editing and plan editing; claiming; risk tiers; discuss threads; third-signatory escalation actions.
+**Recorded future work** (see PRD §9/§13 for detail): audit-chain hardening (operator-side record replication + external chain-head anchoring via Rekor/OpenTimestamps/RFC 3161 — a deliberate non-blockchain decision, reasoning in PRD §9); operator-supplied keys with host-side approval (replacing magic-link invites); OS-level sandboxing of the agent (enforcement today is CC's own permission flags); live collaborative prompt co-editing (simple in-console entry shipped) and plan editing; claiming; risk tiers; discuss threads; third-signatory escalation actions.
 
 ---
 
