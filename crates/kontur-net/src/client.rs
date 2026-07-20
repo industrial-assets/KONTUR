@@ -143,8 +143,8 @@ impl SessionClient {
     }
 
     /// Sign a Go verdict against the gate described by `wire_gate` and send it.
-    pub async fn cast_go(&self, gate: &WireGate) -> io::Result<()> {
-        let verdict = self.build_verdict(gate, Verdict::Go);
+    pub async fn cast_go(&self, gate: &WireGate, depth: ReviewDepth) -> io::Result<()> {
+        let verdict = self.build_verdict(gate, Verdict::Go, depth);
         self.send(ClientMsg::Cast {
             gate_id: gate.gate_id.clone(),
             verdict,
@@ -153,8 +153,8 @@ impl SessionClient {
     }
 
     /// Sign a NoGo verdict with a Steer remedy and send it.
-    pub async fn cast_nogo(&self, gate: &WireGate, steer: &str) -> io::Result<()> {
-        let verdict = self.build_verdict(gate, Verdict::NoGo(Remedy::Steer(steer.to_owned())));
+    pub async fn cast_nogo(&self, gate: &WireGate, steer: &str, depth: ReviewDepth) -> io::Result<()> {
+        let verdict = self.build_verdict(gate, Verdict::NoGo(Remedy::Steer(steer.to_owned())), depth);
         self.send(ClientMsg::Cast {
             gate_id: gate.gate_id.clone(),
             verdict,
@@ -166,14 +166,14 @@ impl SessionClient {
     // Helpers
     // -----------------------------------------------------------------------
 
-    fn build_verdict(&self, gate: &WireGate, v: Verdict) -> CastVerdict {
+    fn build_verdict(&self, gate: &WireGate, v: Verdict, depth: ReviewDepth) -> CastVerdict {
         CastVerdict::create(
             &self.signer,
             &SystemClock,
             &gate.gate_id,
             gate.diff_hash,
             v,
-            ReviewDepth::FullDiff,
+            depth,
             None,
         )
     }
@@ -210,7 +210,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use kontur_core::{Ed25519Signer, Signer, VerdictStatus};
+    use kontur_core::{Ed25519Signer, ReviewDepth, Signer, VerdictStatus};
     use kontur_mcp::{GateHost, InMemoryWorkspace, SessionContext};
 
     use crate::agent::run_agent;
@@ -337,7 +337,7 @@ mod tests {
         let wire_gate = state_with_gate.gate.unwrap();
 
         // A casts go.
-        client_a.cast_go(&wire_gate).await.unwrap();
+        client_a.cast_go(&wire_gate, ReviewDepth::FullDiff).await.unwrap();
 
         // B must see A's key as Sealed before B votes.
         let state_after_a = next_state_matching(&mut rx_b, |s| {
@@ -356,7 +356,7 @@ mod tests {
 
         // B casts go.
         let wire_gate_b = state_after_a.gate.unwrap();
-        client_b.cast_go(&wire_gate_b).await.unwrap();
+        client_b.cast_go(&wire_gate_b, ReviewDepth::FullDiff).await.unwrap();
 
         // Both should see Closed with chain_verified.
         let closed_a =
@@ -380,7 +380,7 @@ mod tests {
         // --- Duplicate cast assertion ---
         // A tries to cast again on the same (now-closed) gate.
         // The server should reject it and send back a Rejected message on A's stream.
-        client_a.cast_go(&wire_gate).await.unwrap();
+        client_a.cast_go(&wire_gate, ReviewDepth::FullDiff).await.unwrap();
 
         // Drain until we get the Rejected.
         let rejected = tokio::time::timeout(Duration::from_secs(5), async {

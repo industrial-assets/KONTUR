@@ -187,9 +187,15 @@ fn active(frame: &mut Frame, area: Rect, view: &SessionView) {
                     Style::default().add_modifier(Modifier::BOLD),
                 )));
             }
-            lines.push(Line::from(
-                " [g] go   [r] no-go +remedy   [e] hand-edit   [o] open diff   [d] discuss",
-            ));
+            if card.diff_opened {
+                lines.push(Line::from(
+                    " [g] go   [r] no-go +remedy   [e] hand-edit   [o] close diff   [d] discuss",
+                ));
+            } else {
+                lines.push(Line::from(
+                    " [o] open diff (required before go)   [r] no-go +remedy   [e] hand-edit   [d] discuss",
+                ));
+            }
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(Block::bordered().title("MERGE GATE"))

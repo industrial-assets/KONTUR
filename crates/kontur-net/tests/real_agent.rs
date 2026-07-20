@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kontur_core::{Ed25519Signer, Signer};
+use kontur_core::{Ed25519Signer, ReviewDepth, Signer};
 use kontur_mcp::{GateHost, GitWorkspace, SessionContext};
 use kontur_net::{
     SessionClient, SessionConfig, SessionServer, WirePhase,
@@ -372,7 +372,7 @@ async fn real_agent_over_tcp() {
         let wire_gate = state_with_gate.gate.unwrap();
 
         // --- 11. A casts go; assert B sees A's key as Sealed ------------------
-        client_a.cast_go(&wire_gate).await.unwrap();
+        client_a.cast_go(&wire_gate, ReviewDepth::FullDiff).await.unwrap();
 
         let state_after_a = cur_b.await_matching("B:sees-A-sealed", |s| {
             s.gate
@@ -393,7 +393,7 @@ async fn real_agent_over_tcp() {
 
         // --- 12. B casts go → gate resolves; propose_task_complete unblocks ---
         let wire_gate_b = state_after_a.gate.unwrap();
-        client_b.cast_go(&wire_gate_b).await.unwrap();
+        client_b.cast_go(&wire_gate_b, ReviewDepth::FullDiff).await.unwrap();
 
         let complete_result =
             tokio::time::timeout(Duration::from_secs(10), propose_complete_handle)

@@ -62,6 +62,7 @@ fn gate_shows_summary_and_sealed_key_never_value() {
         ],
         escalation_required: false,
         diff_preview: None,
+        diff_opened: true, // diff already opened, so [g] go is visible
     };
     let s = draw(&base(ActiveRegion::Gate(card)));
     assert!(s.contains("auth/session.rs"));
@@ -147,6 +148,62 @@ fn invite_panel_shows_full_link_when_set() {
 fn invite_panel_absent_when_none() {
     let s = draw(&base(ActiveRegion::Idle));
     assert!(!s.contains("INVITE"));
+}
+
+/// FR-24: when the diff has not been opened, the key hint must show the
+/// "required before go" copy and must NOT show [g] go.
+#[test]
+fn gate_unopened_diff_shows_required_hint() {
+    let card = GateCard {
+        gate_id: "gate-002".into(),
+        task: "t2".into(),
+        files: vec!["auth/guard.rs".into()],
+        loc: 12,
+        keys: vec![
+            KeyView { label: "A".into(), role: Role::Host, status: KeyStatus::Awaiting },
+            KeyView { label: "B".into(), role: Role::Operator, status: KeyStatus::Awaiting },
+        ],
+        escalation_required: false,
+        diff_preview: None,
+        diff_opened: false, // diff NOT yet opened
+    };
+    let s = draw(&base(ActiveRegion::Gate(card)));
+    assert!(
+        s.contains("open diff (required before go)"),
+        "unopened gate must show required-before-go hint; got:\n{s}"
+    );
+    // [g] go must not appear as an action key when diff is unopened
+    assert!(
+        !s.contains("[g] go"),
+        "unopened gate must NOT show [g] go action; got:\n{s}"
+    );
+}
+
+/// FR-24: after the diff is opened, [g] go must appear and the required hint must not.
+#[test]
+fn gate_opened_diff_shows_go_hint() {
+    let card = GateCard {
+        gate_id: "gate-003".into(),
+        task: "t3".into(),
+        files: vec!["auth/guard.rs".into()],
+        loc: 8,
+        keys: vec![
+            KeyView { label: "A".into(), role: Role::Host, status: KeyStatus::Awaiting },
+            KeyView { label: "B".into(), role: Role::Operator, status: KeyStatus::Awaiting },
+        ],
+        escalation_required: false,
+        diff_preview: None,
+        diff_opened: true, // diff opened
+    };
+    let s = draw(&base(ActiveRegion::Gate(card)));
+    assert!(
+        s.contains("[g] go"),
+        "opened gate must show [g] go hint; got:\n{s}"
+    );
+    assert!(
+        !s.contains("required before go"),
+        "opened gate must NOT show required-before-go hint; got:\n{s}"
+    );
 }
 
 #[test]

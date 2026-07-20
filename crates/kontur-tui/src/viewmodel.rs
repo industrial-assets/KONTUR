@@ -58,6 +58,9 @@ fn gate_card(gv: &GateView, stations: &[Station; 2], diff_preview: Option<String
         keys,
         escalation_required: gv.escalation_required,
         diff_preview,
+        // demo/viewmodel path: diff tracking is not available here;
+        // diff_opened is set by the run loop in remote.rs for the two-seat mode.
+        diff_opened: false,
     }
 }
 

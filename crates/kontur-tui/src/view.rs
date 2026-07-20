@@ -81,6 +81,10 @@ pub struct GateCard {
     pub keys: Vec<KeyView>,
     pub escalation_required: bool,
     pub diff_preview: Option<String>,
+    /// FR-24: whether the operator has opened the diff pane for this gate.
+    /// Must be set by the run loop after calling wire_to_view; render uses it
+    /// to gate the [g] go key hint and refuse the cast.
+    pub diff_opened: bool,
 }
 
 /// A no-go remedy being composed at a gate.

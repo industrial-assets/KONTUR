@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kontur_core::{Ed25519Signer, Signer};
+use kontur_core::{Ed25519Signer, ReviewDepth, Signer};
 use kontur_mcp::{GateHost, GitWorkspace, SessionContext};
 use kontur_net::{
     ScriptedAgent, ScriptedTask, SessionClient, SessionConfig, SessionServer,
@@ -267,7 +267,7 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
         let wire_gate = state_with_gate.gate.unwrap();
 
         // --- 7. A casts go; assert B sees A's key as Sealed --------------------
-        client_a.cast_go(&wire_gate).await.unwrap();
+        client_a.cast_go(&wire_gate, ReviewDepth::FullDiff).await.unwrap();
 
         let state_after_a = cur_b.await_matching("B:sees-A-sealed", |s| {
             s.gate
@@ -288,7 +288,7 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
 
         // --- 8. B casts go; await Closed with chain_verified -------------------
         let wire_gate_b = state_after_a.gate.unwrap();
-        client_b.cast_go(&wire_gate_b).await.unwrap();
+        client_b.cast_go(&wire_gate_b, ReviewDepth::FullDiff).await.unwrap();
 
         let closed_state = cur_a.await_matching("A:closed", |s| {
             matches!(s.phase, WirePhase::Closed { chain_verified: true, .. })
