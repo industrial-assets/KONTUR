@@ -346,9 +346,22 @@ pub async fn run_remote(
         if matches!(compose, ComposeTarget::ConfirmAbandon) && view.notice.is_none() {
             view.notice = Some("abandon session? [y] confirm · [esc] cancel".into());
         }
-        // Prompt compose: show draft in the notice row (consistent with remedy compose).
+        // Prompt compose: show draft in the notice row (consistent with remedy
+        // compose). Keep any active rejection visible alongside the draft —
+        // otherwise "prompt cannot be empty" would be clobbered on the next
+        // frame and the operator would get silent refusals.
         if matches!(compose, ComposeTarget::Prompt) {
-            view.notice = Some(format!("prompt > {}  [↵] submit · [esc] cancel", compose_buf));
+            let warn = if rejected_ttl > 0 {
+                rejected_msg
+                    .as_deref()
+                    .map(|m| format!(" · {m}"))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            view.notice = Some(format!(
+                "prompt > {compose_buf}  [↵] submit · [esc] cancel{warn}"
+            ));
         }
 
         terminal.draw(|f| {
