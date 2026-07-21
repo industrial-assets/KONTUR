@@ -171,6 +171,11 @@ impl SessionClient {
         self.send(ClientMsg::EditPlan { tasks: tasks.to_vec() }).await
     }
 
+    /// Send a plan steer to the agent. Valid only during PlanReview.
+    pub async fn steer_plan(&self, steer: &str) -> io::Result<()> {
+        self.send(ClientMsg::SteerPlan { steer: steer.to_owned() }).await
+    }
+
     /// Request the current worktree contents of a file. The response arrives
     /// as `ServerMsg::FileContent` on the normal server-message stream; the
     /// TUI correlates by path. Fire-and-forget: the caller reads the response

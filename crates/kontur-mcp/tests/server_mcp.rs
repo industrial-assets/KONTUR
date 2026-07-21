@@ -147,3 +147,84 @@ async fn propose_plan_blocks_until_approved() {
     let v: serde_json::Value = serde_json::from_str(text).expect("valid json");
     assert_eq!(v["approved"], serde_json::Value::Bool(true));
 }
+
+#[tokio::test]
+async fn propose_plan_steered_returns_error_then_approve_succeeds() {
+    let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+    let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+    let ws = Arc::new(InMemoryWorkspace::new());
+    let ctx = SessionContext::new("plan steer test", op1, "agent-03", "claude", "1.0", vec![op1, op2]);
+    let host = Arc::new(GateHost::new(ctx, ws));
+
+    let (server_io, client_io) = tokio::io::duplex(8192);
+    let server = KonturServer::new(host.clone());
+    tokio::spawn(async move {
+        if let Ok(running) = serve_server(server, server_io).await {
+            let _ = running.waiting().await;
+        }
+    });
+    let client = ().serve(client_io).await.expect("client handshake");
+
+    // First proposal — will be steered.
+    let plan_args = serde_json::json!({ "tasks": ["do everything at once"] })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let client2 = client.clone();
+    let propose = tokio::spawn(async move {
+        client2
+            .call_tool(CallToolRequestParams::new("propose_plan").with_arguments(plan_args))
+            .await
+    });
+
+    // Wait until the plan is stored, then steer.
+    for _ in 0..2000 {
+        if host.proposed_plan().await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    host.steer_plan("split task 2".to_string()).await;
+
+    // The steered propose_plan call returns an MCP error carrying the steer.
+    let err = tokio::time::timeout(Duration::from_secs(5), propose)
+        .await
+        .expect("steer must unblock within 5s")
+        .expect("task join")
+        .expect_err("steered plan must surface as an MCP error");
+    let msg = err.to_string();
+    assert!(msg.contains("split task 2"), "error must carry the steer: {msg}");
+
+    // Agent re-proposes; approve; success.
+    let plan_args2 = serde_json::json!({ "tasks": ["task a", "task b"] })
+        .as_object()
+        .cloned()
+        .unwrap();
+    let client3 = client.clone();
+    let propose2 = tokio::spawn(async move {
+        client3
+            .call_tool(CallToolRequestParams::new("propose_plan").with_arguments(plan_args2))
+            .await
+    });
+
+    for _ in 0..2000 {
+        if host.proposed_plan().await == Some(vec!["task a".to_string(), "task b".to_string()]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    host.approve_plan().await;
+
+    let result2 = tokio::time::timeout(Duration::from_secs(5), propose2)
+        .await
+        .expect("approve must unblock within 5s")
+        .expect("task join")
+        .expect("propose_plan tool call ok");
+    assert_eq!(result2.is_error, Some(false), "re-proposed plan must succeed after approve");
+    let text2 = match &result2.content[0] {
+        rmcp::model::ContentBlock::Text(t) => t.text.clone(),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&text2).expect("valid json");
+    assert_eq!(v["approved"], serde_json::Value::Bool(true));
+}

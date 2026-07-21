@@ -40,6 +40,8 @@ pub enum Action {
     PlanMoveUp,
     /// Move selected task down in the list (PlanReview phase only).
     PlanMoveDown,
+    /// Begin composing a plan steer (PlanReview phase only).
+    PlanSteerBegin,
     None,
 }
 
@@ -61,6 +63,7 @@ pub fn map_key(code: KeyCode, composing_remedy: bool, plan_mode: bool) -> Action
 
     if plan_mode {
         return match code {
+            KeyCode::Char('r') => Action::PlanSteerBegin,
             KeyCode::Char('j') | KeyCode::Down => Action::PlanSelectDown,
             KeyCode::Char('k') | KeyCode::Up => Action::PlanSelectUp,
             KeyCode::Char('e') => Action::PlanEditBegin,
@@ -162,6 +165,13 @@ mod tests {
         assert_eq!(map_key(KeyCode::Char('q'), false, true), Action::Quit);
         // Unbound keys → None
         assert_eq!(map_key(KeyCode::Char('g'), false, true), Action::None);
+    }
+
+    #[test]
+    fn plan_steer_begin_maps_r_in_plan_mode() {
+        assert_eq!(map_key(KeyCode::Char('r'), false, true), Action::PlanSteerBegin);
+        // r outside plan mode is NoGoBegin (unchanged)
+        assert_eq!(map_key(KeyCode::Char('r'), false, false), Action::NoGoBegin);
     }
 
     #[test]

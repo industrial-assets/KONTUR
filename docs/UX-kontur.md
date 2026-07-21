@@ -133,7 +133,7 @@ A reviewer's suggestion is a proposal the drafter accepts, which leaves a trace 
 ### 6.3 Plan review
 The agent analyses and returns a task list — a DAG of bounded, single-concern tasks (PRD FR-6). Both operators approve or edit before any code is written.
 
-> **Implemented (2026-07-21, FR-7):** plan editing is live. `j`/`k` moves the selection cursor; `e` opens the current task text in the compose line for in-place editing; `d` deletes a task (blocked if only one remains); `<`/`>` reorders the selected task up or down. Any edit resets both ready flags — both seats must re-signal `y` against the current list before execution begins. The approved (possibly edited/reordered) list is returned to the agent via the `propose_plan` MCP response; the agent executes exactly that list in that order.
+> **Implemented (2026-07-21, FR-7):** plan editing is live. `j`/`k` moves the selection cursor; `e` opens the current task text in the compose line for in-place editing; `d` deletes a task (blocked if only one remains); `<`/`>` reorders the selected task up or down. Any edit resets both ready flags — both seats must re-signal `y` against the current list before execution begins. The approved (possibly edited/reordered) list is returned to the agent via the `propose_plan` MCP response; the agent executes exactly that list in that order. Steer-first approach preferred: `[r]` sends a steer prompt to the agent to revise and re-propose; manual edits (`e`/`d`/`<`/`>`) remain available.
 
 ```
  ┌ PLAN ───────────────────────────────────────────────────────────┐
@@ -142,7 +142,7 @@ The agent analyses and returns a task list — a DAG of bounded, single-concern 
  │    t3  auth/session.ts   thread expiry into guard              │
  │    t4  tests/session_*   regression: expiry path               │
  │  PLAN GATE   A ⟨□⟩ ready   B ⟨□⟩ ready                        │
- │  j/k select · e edit · d delete · </> move · y approve — needs both │
+ │  [r] steer replan · j/k select · e edit · d delete · </> move · [y] approve — needs both │
  └────────────────────────────────────────────────────────────────┘
 ```
 

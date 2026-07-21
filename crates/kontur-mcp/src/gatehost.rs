@@ -12,6 +12,14 @@ use crate::provenance::build_provenance;
 use crate::session::SessionContext;
 use crate::workspace::{diff_hash, CommandOutput, Workspace};
 
+/// Decision state for the plan-approval watch channel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanDecision {
+    Pending,
+    Approved,
+    Steered(String),
+}
+
 /// Live activity events for observers (the session server). Best-effort
 /// display stream — never blocks or gates the enforcement path.
 #[derive(Clone, Debug)]
@@ -25,6 +33,8 @@ pub enum HostEvent {
     /// fresh gate — realtime property.
     GateSuperseded { old_gate_id: GateId, new_gate_id: GateId },
     PlanProposed { tasks: Vec<String> },
+    /// Emitted after `steer_plan` routes a replan prompt to the agent.
+    PlanSteered { steer: String },
     SessionAbandoned,
 }
 
@@ -84,11 +94,11 @@ struct SessionState {
     holds: Vec<HoldEntry>,
     next_gate: u64,
     plan: Option<Vec<String>>,
-    plan_approved_tx: watch::Sender<bool>,
-    /// Kept alive so `send_replace` on `plan_approved_tx` is never a no-op
+    plan_decision_tx: watch::Sender<PlanDecision>,
+    /// Kept alive so `send_replace` on `plan_decision_tx` is never a no-op
     /// (watch::send discards when there are zero receivers; keeping one here
     /// guarantees the channel is always live — same pattern as kontur-net).
-    _plan_approved_rx: watch::Receiver<bool>,
+    _plan_decision_rx: watch::Receiver<PlanDecision>,
     /// Set by `abandon_session` under the state lock. Once `true`,
     /// `submit_verdict`, `begin_task_gate`, `hand_edit`, and `propose_plan`
     /// all return `Err(GateHostError::SessionAbandoned)` immediately.
@@ -119,7 +129,7 @@ pub struct GateHost {
 impl GateHost {
     pub fn new(ctx: SessionContext, workspace: Arc<dyn Workspace>) -> Self {
         let (events, _) = broadcast::channel(64);
-        let (plan_approved_tx, _plan_approved_rx) = watch::channel(false);
+        let (plan_decision_tx, _plan_decision_rx) = watch::channel(PlanDecision::Pending);
         GateHost {
             state: Arc::new(Mutex::new(SessionState {
                 ctx,
@@ -127,8 +137,8 @@ impl GateHost {
                 holds: Vec::new(),
                 next_gate: 0,
                 plan: None,
-                plan_approved_tx,
-                _plan_approved_rx,
+                plan_decision_tx,
+                _plan_decision_rx,
                 abandoned: false,
                 superseded: Vec::new(),
             })),
@@ -144,8 +154,10 @@ impl GateHost {
 
     /// Agent face: propose a plan (list of task descriptions). Stores the plan,
     /// emits `HostEvent::PlanProposed`, and returns a watch receiver that flips
-    /// to `true` when both operators approve. Re-proposal overwrites (idempotent).
-    pub async fn propose_plan(&self, tasks: Vec<String>) -> Result<watch::Receiver<bool>, GateHostError> {
+    /// to `PlanDecision::Approved` when both operators approve (or
+    /// `PlanDecision::Steered` when they route a replan). Re-proposal overwrites
+    /// (idempotent).
+    pub async fn propose_plan(&self, tasks: Vec<String>) -> Result<watch::Receiver<PlanDecision>, GateHostError> {
         let mut st = self.state.lock().await;
         if st.abandoned {
             return Err(GateHostError::SessionAbandoned);
@@ -154,17 +166,17 @@ impl GateHost {
         // Create a fresh watch channel on each proposal. Prior subscribers are
         // closed (their changed() errors), correctly surfacing "plan superseded".
         // This prevents the stale-approval bypass: after approve_plan() sets
-        // `true`, a re-proposal returning a subscriber from the *old* channel
-        // would immediately read true without operator action.
-        let (new_tx, new_rx) = watch::channel(false);
-        st.plan_approved_tx = new_tx;
-        st._plan_approved_rx = new_rx;
+        // `Approved`, a re-proposal returning a subscriber from the *old* channel
+        // would immediately read Approved without operator action.
+        let (new_tx, new_rx) = watch::channel(PlanDecision::Pending);
+        st.plan_decision_tx = new_tx;
+        st._plan_decision_rx = new_rx;
 
         st.plan = Some(tasks.clone());
         // Return a new subscriber BEFORE releasing the lock so the initial
-        // `false` is always visible and `send_replace(true)` from approve_plan
-        // cannot race past this subscribe.
-        let rx = st.plan_approved_tx.subscribe();
+        // `Pending` is always visible and `send_replace(Approved)` from
+        // approve_plan cannot race past this subscribe.
+        let rx = st.plan_decision_tx.subscribe();
         drop(st);
         let _ = self.events.send(HostEvent::PlanProposed { tasks });
         Ok(rx)
@@ -174,8 +186,23 @@ impl GateHost {
     /// awaiter on the watch returned by `propose_plan`.
     pub async fn approve_plan(&self) {
         let st = self.state.lock().await;
-        // send_replace never discards (we keep _plan_approved_rx alive in state).
-        st.plan_approved_tx.send_replace(true);
+        // send_replace never discards (we keep _plan_decision_rx alive in state).
+        st.plan_decision_tx.send_replace(PlanDecision::Approved);
+    }
+
+    /// Operator face: route a steer prompt to the agent to revise its plan.
+    /// Resolves the watch returned by `propose_plan` with `PlanDecision::Steered`
+    /// so the parked MCP call returns an error carrying the steer. No-op when the
+    /// session has been abandoned — same silent pattern as `set_plan`.
+    pub async fn steer_plan(&self, steer: String) {
+        {
+            let st = self.state.lock().await;
+            if st.abandoned {
+                return;
+            }
+            st.plan_decision_tx.send_replace(PlanDecision::Steered(steer.clone()));
+        }
+        let _ = self.events.send(HostEvent::PlanSteered { steer });
     }
 
     /// Operator face: read the currently proposed plan (None until one arrives).
@@ -926,8 +953,8 @@ mod tests {
         // proposed_plan() returns the tasks.
         assert_eq!(host.proposed_plan().await, Some(tasks.clone()));
 
-        // The watch starts false.
-        assert!(!*rx.borrow());
+        // The watch starts Pending.
+        assert_eq!(*rx.borrow(), PlanDecision::Pending);
 
         // A PlanProposed event was emitted.
         let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
@@ -954,25 +981,25 @@ mod tests {
         // Obtain a fresh receiver on the same proposal channel.
         let mut rx2 = {
             let st = host.state.lock().await;
-            st.plan_approved_tx.subscribe()
+            st.plan_decision_tx.subscribe()
         };
-        assert!(!*rx2.borrow());
+        assert_eq!(*rx2.borrow(), PlanDecision::Pending);
 
         // Approve.
         host.approve_plan().await;
 
-        // Both receivers on the current channel observe true after approval.
+        // Both receivers on the current channel observe Approved after approval.
         let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         let _ = tokio::time::timeout(Duration::from_millis(100), rx2.changed()).await;
-        assert!(*rx.borrow_and_update(), "rx must see true after approve");
-        assert!(*rx2.borrow_and_update(), "rx2 (direct subscribe) must see true");
+        assert_eq!(*rx.borrow_and_update(), PlanDecision::Approved, "rx must see Approved after approve");
+        assert_eq!(*rx2.borrow_and_update(), PlanDecision::Approved, "rx2 (direct subscribe) must see Approved");
 
-        // A receiver obtained AFTER approve on the same channel sees true immediately (send_replace property).
+        // A receiver obtained AFTER approve on the same channel sees Approved immediately (send_replace property).
         let rx3 = {
             let st = host.state.lock().await;
-            st.plan_approved_tx.subscribe()
+            st.plan_decision_tx.subscribe()
         };
-        assert!(*rx3.borrow(), "subscriber after send_replace(true) must see true immediately");
+        assert_eq!(*rx3.borrow(), PlanDecision::Approved, "subscriber after send_replace(Approved) must see Approved immediately");
     }
 
     #[tokio::test]
@@ -1005,13 +1032,13 @@ mod tests {
         let mut rx1 = host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
         host.approve_plan().await;
 
-        // The original receiver sees true.
+        // The original receiver sees Approved.
         let _ = tokio::time::timeout(Duration::from_millis(100), rx1.changed()).await;
-        assert!(*rx1.borrow_and_update(), "original rx must see true after approve");
+        assert_eq!(*rx1.borrow_and_update(), PlanDecision::Approved, "original rx must see Approved after approve");
 
-        // Re-propose plan B: fresh watch channel, state reset to false.
+        // Re-propose plan B: fresh watch channel, state reset to Pending.
         let mut rx2 = host.propose_plan(vec!["task-b".to_string()]).await.unwrap();
-        assert!(!*rx2.borrow(), "re-proposal must reset approval to false");
+        assert_eq!(*rx2.borrow(), PlanDecision::Pending, "re-proposal must reset approval to Pending");
 
         // The old receiver's changed() now errors (channel closed by the swap).
         let changed_result = tokio::time::timeout(Duration::from_millis(100), rx1.changed()).await;
@@ -1020,10 +1047,83 @@ mod tests {
             "old receiver's changed() must fail after channel swap"
         );
 
-        // Approve the new plan: fresh watch transitions to true.
+        // Approve the new plan: fresh watch transitions to Approved.
         host.approve_plan().await;
         let _ = tokio::time::timeout(Duration::from_millis(100), rx2.changed()).await;
-        assert!(*rx2.borrow_and_update(), "new rx must see true after fresh approve");
+        assert_eq!(*rx2.borrow_and_update(), PlanDecision::Approved, "new rx must see Approved after fresh approve");
+    }
+
+    #[tokio::test]
+    async fn steer_plan_resolves_watch_with_steered_and_emits_event() {
+        use std::time::Duration;
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        let mut ev_rx = host.subscribe_events();
+
+        let mut rx = host.propose_plan(vec!["task-a".to_string(), "task-b".to_string()]).await.unwrap();
+        assert_eq!(*rx.borrow(), PlanDecision::Pending);
+
+        // Steer routes a replan.
+        host.steer_plan("split task 2".to_string()).await;
+
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
+        assert_eq!(
+            *rx.borrow_and_update(),
+            PlanDecision::Steered("split task 2".to_string()),
+            "rx must observe Steered after steer_plan"
+        );
+
+        // A PlanSteered event was emitted.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut got_event = false;
+        loop {
+            match ev_rx.try_recv() {
+                Ok(HostEvent::PlanSteered { steer }) => {
+                    assert_eq!(steer, "split task 2");
+                    got_event = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                _ => break,
+            }
+        }
+        assert!(got_event, "PlanSteered event not received");
+    }
+
+    #[tokio::test]
+    async fn reproposal_after_steer_resets_decision() {
+        use std::time::Duration;
+
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        // Propose plan A, steer it.
+        let mut rx1 = host.propose_plan(vec!["task-a".to_string()]).await.unwrap();
+        host.steer_plan("rethink".to_string()).await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx1.changed()).await;
+        assert_eq!(*rx1.borrow_and_update(), PlanDecision::Steered("rethink".to_string()));
+
+        // Re-propose plan B: fresh channel starts at Pending.
+        let mut rx2 = host.propose_plan(vec!["task-b".to_string()]).await.unwrap();
+        assert_eq!(*rx2.borrow(), PlanDecision::Pending, "re-proposal must reset to Pending");
+
+        // Approve the new plan: transitions to Approved.
+        host.approve_plan().await;
+        let _ = tokio::time::timeout(Duration::from_millis(100), rx2.changed()).await;
+        assert_eq!(*rx2.borrow_and_update(), PlanDecision::Approved, "new rx must see Approved after approve");
     }
 
     #[tokio::test]

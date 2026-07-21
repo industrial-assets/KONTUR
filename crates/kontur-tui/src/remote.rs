@@ -30,6 +30,8 @@ enum ComposeTarget {
     Prompt,
     /// Editing a plan task in-place. `idx` is the task's index in the list.
     PlanEdit { idx: usize },
+    /// Composing a plan steer prompt.
+    PlanSteer,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +380,17 @@ pub async fn run_remote(
                 idx + 1
             ));
         }
+        // Plan steer compose: show the steer buffer in the notice row.
+        if matches!(compose, ComposeTarget::PlanSteer) {
+            let warn = if rejected_ttl > 0 {
+                rejected_msg.as_deref().map(|m| format!(" · {m}")).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            view.notice = Some(format!(
+                "steer > {compose_buf}  [↵] send · [esc] cancel{warn}"
+            ));
+        }
 
         // When a gate is pending with multiple files, show file-cycle hint in notice.
         if view.notice.is_none() {
@@ -415,6 +428,14 @@ pub async fn run_remote(
             }
             Some(Action::PlanSelectUp) => {
                 plan_sel = plan_sel.saturating_sub(1);
+            }
+
+            // Begin composing a plan steer prompt.
+            Some(Action::PlanSteerBegin) => {
+                if matches!(view.active, ActiveRegion::Plan { .. }) {
+                    compose = ComposeTarget::PlanSteer;
+                    compose_buf.clear();
+                }
             }
 
             // Begin editing the selected plan task (seeded with current text).
@@ -666,6 +687,17 @@ pub async fn run_remote(
                                 let new_list = planedit::edit_task(tasks.clone(), idx, compose_buf.clone());
                                 let _ = client.edit_plan(&new_list).await;
                             }
+                            compose = ComposeTarget::None;
+                            compose_buf.clear();
+                        }
+                    }
+                    ComposeTarget::PlanSteer => {
+                        if compose_buf.trim().is_empty() {
+                            // No bare steer: keep composing
+                            rejected_msg = Some("steer cannot be empty".into());
+                            rejected_ttl = 20;
+                        } else {
+                            let _ = client.steer_plan(&compose_buf).await;
                             compose = ComposeTarget::None;
                             compose_buf.clear();
                         }

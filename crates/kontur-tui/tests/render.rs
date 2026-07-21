@@ -104,7 +104,8 @@ fn plan_region_renders_plan_gate_and_approve_key() {
         selected: 0,
     }));
     assert!(s.contains("PLAN GATE"));
-    assert!(s.contains("y approve"));
+    assert!(s.contains("[y] approve"));
+    assert!(s.contains("[r] steer replan"));
 }
 
 #[test]

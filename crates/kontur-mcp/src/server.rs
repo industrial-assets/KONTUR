@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use kontur_core::{HoldState, Remedy, TaskId};
 
-use crate::gatehost::GateHost;
+use crate::gatehost::{GateHost, PlanDecision};
 
 /// The rmcp server exposing the agent-facing gated tools over a `GateHost`.
 #[derive(Clone)]
@@ -107,11 +107,20 @@ impl KonturServer {
         let mut rx = self.host.propose_plan(tasks).await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        // Await approval. borrow_and_update reads the current value and marks
-        // it seen; loop until true. A closed channel means the session closed.
+        // Await a decision. borrow_and_update reads the current value and marks
+        // it seen; loop until terminal. Approved breaks; Steered returns an
+        // error carrying the remedy so the agent revises and re-proposes. A
+        // closed channel means the session closed.
         loop {
-            if *rx.borrow_and_update() {
-                break;
+            match rx.borrow_and_update().clone() {
+                PlanDecision::Pending => {}
+                PlanDecision::Approved => break,
+                PlanDecision::Steered(s) => {
+                    return Err(ErrorData::invalid_request(
+                        format!("plan rejected: {s} — revise the task list and call propose_plan again"),
+                        None,
+                    ));
+                }
             }
             if rx.changed().await.is_err() {
                 return Err(ErrorData::internal_error("session closed", None));

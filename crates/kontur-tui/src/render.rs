@@ -282,7 +282,7 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion) {
                 a_mark, b_mark
             )));
             lines.push(Line::from(
-                " j/k select · e edit · d delete · </> move · y approve — needs both",
+                " [r] steer replan · j/k select · e edit · d delete · </> move · [y] approve — needs both",
             ));
             frame.render_widget(
                 Paragraph::new(lines).block(Block::bordered().title("PLAN")),
@@ -490,6 +490,26 @@ mod tests {
         assert!(
             rendered.contains("do the thing"),
             "expected prompt text in rendered output; got:\n{rendered}"
+        );
+    }
+
+    /// The plan-review hint must lead with the steer key and bracket both
+    /// gate keys ([r] steer, [y] approve).
+    #[test]
+    fn plan_review_hint_leads_with_steer() {
+        let view = minimal_view(ActiveRegion::Plan {
+            tasks: vec!["task one".into(), "task two".into()],
+            ready: [false, false],
+            selected: 0,
+        });
+        let rendered = draw(&view);
+        assert!(
+            rendered.contains("[r] steer replan"),
+            "expected '[r] steer replan' in rendered Plan region; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("[y] approve"),
+            "expected '[y] approve' in rendered Plan region; got:\n{rendered}"
         );
     }
 

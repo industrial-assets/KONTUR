@@ -24,6 +24,9 @@ pub enum ClientMsg {
     /// Replace the current plan with a new task list. Valid only during
     /// `PlanReview`; resets both ready flags so both seats must re-consent.
     EditPlan { tasks: Vec<String> },
+    /// Send a steer prompt to the agent to revise its plan. Valid only during
+    /// `PlanReview`; resets both ready flags and withdraws the current plan list.
+    SteerPlan { steer: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
