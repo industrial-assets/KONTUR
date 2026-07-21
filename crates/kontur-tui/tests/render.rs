@@ -310,3 +310,17 @@ fn gate_files_bar_shows_selection_marker() {
         "selected file must be marked with ▶; got:\n{s}"
     );
 }
+
+#[test]
+fn log_lines_without_time_or_who_have_no_padding() {
+    let mut view = base(ActiveRegion::Idle);
+    view.log = vec![kontur_tui::view::LogLine {
+        time: String::new(),
+        who: String::new(),
+        text: "02:11 agent wrote src/guard.rs".into(),
+    }];
+    let s = draw(&view);
+    // exactly one leading space inside the bordered pane, not ~11
+    assert!(s.contains(" 02:11 agent wrote src/guard.rs"));
+    assert!(!s.contains("          02:11 agent wrote"));
+}
