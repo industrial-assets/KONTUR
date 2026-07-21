@@ -858,6 +858,19 @@ async fn handle_client_msg(
             server.refresh_locked().await;
         }
         ClientMsg::Cast { gate_id, verdict } => {
+            // Bind the verdict to the connection's authenticated identity: a
+            // seat may only cast as itself. Without this, gate acceptance would
+            // rest on any two distinct valid signatures rather than on the two
+            // authenticated (and, for BYO seat B, host-approved) seat keys —
+            // load-bearing for the four-eyes guarantee.
+            if verdict.operator != operator {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "verdict identity does not match your seat".into(),
+                    })
+                    .await;
+                return;
+            }
             let label = {
                 let net = server.inner.net.lock().await;
                 net.seats[seat_idx].label.clone()
@@ -2362,6 +2375,106 @@ mod tests {
             }
             _ => panic!("expected Closed phase"),
         }
+    }
+
+    /// A seat cannot cast a verdict signed by a key other than the one it
+    /// authenticated with — the verdict identity must match the seat.
+    #[tokio::test]
+    async fn cast_with_foreign_identity_is_rejected() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let (server, _ws) = make_server(op1, op2, vec!["guard.rs".into()]);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+        tokio::spawn(crate::agent::run_agent(agent, server.clone()));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        drain_client(BufReader::new(cb_read)).await;
+        let mut ca_reader = BufReader::new(ca_read);
+
+        for (w, seat, op) in [(&mut ca_write, "A", op1), (&mut cb_write, "B", op2)] {
+            write_json(
+                w,
+                &ClientMsg::Hello {
+                    seat: seat.into(),
+                    operator: op,
+                    protocol: crate::protocol::PROTOCOL_VERSION,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::DispatchReady { .. })
+            }),
+        )
+        .await
+        .expect("DispatchReady");
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::PlanReview { .. })
+            }),
+        )
+        .await
+        .expect("PlanReview");
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        let gated = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| s.gate.is_some()),
+        )
+        .await
+        .expect("gate");
+        let wg = gated.gate.unwrap();
+        let gid = wg.gate_id;
+        let dh = wg.diff_hash;
+
+        // Seat A tries to cast a verdict signed by op2 (not its authenticated key).
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Cast {
+                gate_id: gid.clone(),
+                verdict: cast_go(2, &gid, dh),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The rejection with an identity reason arrives on A's stream.
+        let mut got = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                read_json::<_, ServerMsg>(&mut ca_reader),
+            )
+            .await
+            {
+                Ok(Ok(Some(ServerMsg::Rejected { reason }))) if reason.contains("identity") => {
+                    got = true;
+                    break;
+                }
+                Ok(Ok(Some(_))) => continue,
+                _ => break,
+            }
+        }
+        assert!(got, "a foreign-identity cast must be rejected");
     }
 
     /// A Ping is answered with a Pong and is never gated — pure liveness.
