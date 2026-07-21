@@ -147,7 +147,20 @@ fn log(frame: &mut Frame, area: Rect, view: &SessionView) {
     let lines: Vec<Line> = view
         .log
         .iter()
-        .map(|l| Line::from(format!(" {} {:<8} {}", l.time, l.who, l.text)))
+        .map(|l| {
+            // Only pad columns that exist: server-formatted lines arrive with
+            // empty time/who, and padding empties wastes ~11 leading columns.
+            let mut s = String::from(" ");
+            if !l.time.is_empty() {
+                s.push_str(&l.time);
+                s.push(' ');
+            }
+            if !l.who.is_empty() {
+                s.push_str(&format!("{:<8} ", l.who));
+            }
+            s.push_str(&l.text);
+            Line::from(s)
+        })
         .collect();
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title("LOG")),
