@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use kontur_core::{HoldState, Remedy, TaskId};
 
-use crate::gatehost::GateHost;
+use crate::gatehost::{GateHost, PlanDecision};
 
 /// The rmcp server exposing the agent-facing gated tools over a `GateHost`.
 #[derive(Clone)]
@@ -61,6 +61,9 @@ pub struct ProposePlanInput {
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 pub struct ProposePlanOutput {
     pub approved: bool,
+    /// The APPROVED task list, which operators may have edited, deleted from,
+    /// or reordered from the original proposal. Execute exactly this list.
+    pub tasks: Vec<String>,
 }
 
 impl KonturServer {
@@ -104,18 +107,29 @@ impl KonturServer {
         let mut rx = self.host.propose_plan(tasks).await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        // Await approval. borrow_and_update reads the current value and marks
-        // it seen; loop until true. A closed channel means the session closed.
+        // Await a decision. borrow_and_update reads the current value and marks
+        // it seen; loop until terminal. Approved breaks; Steered returns an
+        // error carrying the remedy so the agent revises and re-proposes. A
+        // closed channel means the session closed.
         loop {
-            if *rx.borrow_and_update() {
-                break;
+            match rx.borrow_and_update().clone() {
+                PlanDecision::Pending => {}
+                PlanDecision::Approved => break,
+                PlanDecision::Steered(s) => {
+                    return Err(ErrorData::invalid_request(
+                        format!("plan rejected: {s} — revise the task list and call propose_plan again"),
+                        None,
+                    ));
+                }
             }
             if rx.changed().await.is_err() {
                 return Err(ErrorData::internal_error("session closed", None));
             }
         }
 
-        Ok(Json(ProposePlanOutput { approved: true }))
+        // Return the APPROVED task list — operators may have edited it.
+        let final_tasks = self.host.proposed_plan().await.unwrap_or_default();
+        Ok(Json(ProposePlanOutput { approved: true, tasks: final_tasks }))
     }
 
     #[tool(name = "propose_task_complete", description = "Submit the completed task for four-eyes review; blocks until both operators sign off.")]
