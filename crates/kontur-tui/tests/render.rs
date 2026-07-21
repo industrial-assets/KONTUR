@@ -58,6 +58,8 @@ fn base(active: ActiveRegion) -> SessionView {
         show_help: false,
         agent_log: None,
         link_lost: false,
+        cursor: None,
+        blink_on: false,
     }
 }
 

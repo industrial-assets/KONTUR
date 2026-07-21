@@ -1,6 +1,7 @@
 use std::io::{self, Stdout};
 
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -22,7 +23,14 @@ impl TerminalGuard {
     pub fn enter() -> io::Result<(Self, Tui)> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, event::EnableBracketedPaste)?;
+        // Steady bar: we blink it ourselves (only drawing it on the "on"
+        // frames of a slow cadence), so the terminal's own blink stays off.
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            event::EnableBracketedPaste,
+            SetCursorStyle::SteadyBar
+        )?;
         // Restore the terminal on panic BEFORE the default hook prints, so the
         // backtrace isn't swallowed by the alternate screen / raw mode.
         let prev = std::panic::take_hook();
@@ -40,6 +48,7 @@ impl TerminalGuard {
         let _ = execute!(
             io::stdout(),
             event::DisableBracketedPaste,
+            SetCursorStyle::DefaultUserShape,
             LeaveAlternateScreen
         );
     }

@@ -246,6 +246,8 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         show_help: false,
         agent_log: None,
         link_lost: false,
+        cursor: None,
+        blink_on: false,
     }
 }
 
@@ -581,6 +583,8 @@ pub async fn run_remote(
     let mut compose = ComposeTarget::None;
     let mut compose_buf = String::new();
     let mut compose_cursor: usize = 0;
+    // Slow-flash cadence for the text-entry caret (~600ms at 200ms poll).
+    let mut blink_frame: u32 = 0;
     // Prompt text as it was when [p] was pressed — Esc restores it (drafts
     // stream live to the other seat, so cancel must undo what they saw).
     let mut prompt_before = String::new();
@@ -609,6 +613,8 @@ pub async fn run_remote(
             rejected_msg = None;
         }
 
+        blink_frame = blink_frame.wrapping_add(1);
+        let blink_on = (blink_frame / 3).is_multiple_of(2);
         let state = state_rx.borrow().clone();
         // Clamp plan_sel whenever the task list changes (remote edits can shrink it).
         if let WirePhase::PlanReview { tasks } = &state.phase {
@@ -654,8 +660,27 @@ pub async fn run_remote(
         } else {
             String::new()
         };
-        if let Some(text) = compose_notice(&compose, &compose_buf, &warn) {
+        view.blink_on = blink_on;
+        if let Some((text, caret_col)) =
+            compose_notice(&compose, &compose_buf, compose_cursor, &warn)
+        {
             view.notice = Some(text);
+            // In-notice caret: " > " (3) + column within the notice string.
+            if let Some(col) = caret_col {
+                view.cursor = Some(crate::view::CursorTarget::Command {
+                    col: (col + 3) as u16,
+                });
+            }
+        }
+        // Prompt compose: echo the local draft into the PROMPT pane (zero-lag,
+        // so the caret index matches) and place the caret there.
+        if matches!(compose, ComposeTarget::Prompt) {
+            if let ActiveRegion::Prompt { prompt, .. } = &mut view.active {
+                *prompt = compose_buf.clone();
+            }
+            view.cursor = Some(crate::view::CursorTarget::Prompt {
+                index: compose_cursor,
+            });
         }
 
         // When a gate is pending with multiple files, show file-cycle hint in notice.
@@ -1152,36 +1177,55 @@ pub async fn run_remote(
 /// The notice-row text for an in-progress compose, if any. Exhaustive over
 /// `ComposeTarget` so every compose mode has a visible input line; `warn`
 /// carries any active rejection to keep refusals visible while typing.
-fn compose_notice(compose: &ComposeTarget, buf: &str, warn: &str) -> Option<String> {
+/// The notice-row text for the current compose, plus the char column of the
+/// caret within that string (before the " > " command-row prefix) when the
+/// buffer is editable in the notice. `None` column → no in-notice caret (the
+/// prompt draft's caret lives in the PROMPT pane; non-buffer notices have none).
+fn compose_notice(
+    compose: &ComposeTarget,
+    buf: &str,
+    cursor: usize,
+    warn: &str,
+) -> Option<(String, Option<usize>)> {
+    // For an "{prefix}{buf}{suffix}" notice, the caret column is the prefix
+    // length plus the caret's index in the buffer (inline() is 1:1 on chars).
+    let with_buf = |prefix: &str, suffix: &str| {
+        let col = prefix.chars().count() + cursor.min(compose::char_len(buf));
+        (
+            format!("{prefix}{}{suffix}", compose::inline(buf)),
+            Some(col),
+        )
+    };
     match compose {
         ComposeTarget::None => None,
-        // The prompt draft renders in the PROMPT pane itself (multi-line, with
-        // cursor); the notice row carries only the verbs.
-        ComposeTarget::Prompt => Some(format!(
-            "editing prompt — [↵] submit · [alt+↵] newline · [esc] cancel{warn}"
+        // The prompt draft renders in the PROMPT pane (its caret lives there).
+        ComposeTarget::Prompt => Some((
+            format!("editing prompt — [↵] submit · [alt+↵] newline · [esc] cancel{warn}"),
+            None,
         )),
-        ComposeTarget::Remedy => Some(format!(
-            "no-go steer > {}  [↵] cast no-go · [alt+↵] newline · [esc] cancel{warn}",
-            compose::inline(buf)
+        ComposeTarget::Remedy => Some(with_buf(
+            "no-go steer > ",
+            &format!("  [↵] cast no-go · [alt+↵] newline · [esc] cancel{warn}"),
         )),
-        ComposeTarget::PlanEdit { idx } => Some(format!(
-            "edit t{} > {}  [↵] submit · [esc] cancel",
-            idx + 1,
-            compose::inline(buf)
+        ComposeTarget::PlanEdit { idx } => Some(with_buf(
+            &format!("edit t{} > ", idx + 1),
+            "  [↵] submit · [esc] cancel",
         )),
-        ComposeTarget::PlanSteer => Some(format!(
-            "steer > {}  [↵] send · [alt+↵] newline · [esc] cancel{warn}",
-            compose::inline(buf)
+        ComposeTarget::PlanSteer => Some(with_buf(
+            "steer > ",
+            &format!("  [↵] send · [alt+↵] newline · [esc] cancel{warn}"),
         )),
-        ComposeTarget::Discuss { .. } => Some(format!(
-            "note > {}  [↵] post · [esc] cancel{warn}",
-            compose::inline(buf)
+        ComposeTarget::Discuss { .. } => Some(with_buf(
+            "note > ",
+            &format!("  [↵] post · [esc] cancel{warn}"),
         )),
-        ComposeTarget::ClarifyCustom { .. } => Some(format!(
-            "your answer > {}  [↵] submit · [esc] cancel{warn}",
-            compose::inline(buf)
+        ComposeTarget::ClarifyCustom { .. } => Some(with_buf(
+            "your answer > ",
+            &format!("  [↵] submit · [esc] cancel{warn}"),
         )),
-        ComposeTarget::ConfirmAbandon => Some("abandon session? [y] confirm · [esc] cancel".into()),
+        ComposeTarget::ConfirmAbandon => {
+            Some(("abandon session? [y] confirm · [esc] cancel".into(), None))
+        }
     }
 }
 
@@ -1800,23 +1844,26 @@ mod tests {
         ];
         for mode in &modes {
             assert!(
-                compose_notice(mode, "draft", "").is_some(),
+                compose_notice(mode, "draft", 5, "").is_some(),
                 "compose mode without a visible input line"
             );
         }
-        assert!(compose_notice(&ComposeTarget::None, "", "").is_none());
+        assert!(compose_notice(&ComposeTarget::None, "", 0, "").is_none());
     }
 
     #[test]
     fn remedy_compose_shows_buffer_and_warning() {
-        let n = compose_notice(
+        let (n, caret) = compose_notice(
             &ComposeTarget::Remedy,
             "add a test",
+            3,
             " · steer cannot be empty",
         )
         .unwrap();
         assert!(n.contains("no-go steer > add a test"));
         assert!(n.contains("steer cannot be empty"));
         assert!(n.contains("[esc] cancel"));
+        // caret column = "no-go steer > " (14) + cursor (3).
+        assert_eq!(caret, Some(17));
     }
 }
