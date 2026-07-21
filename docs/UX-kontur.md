@@ -87,6 +87,19 @@ Rotation can also be **scheduled**: at session start the operators agree an inte
 ### 5.4 The blind sign-off (where the two consoles diverge)
 At a high-risk gate, the two operators **do not see the same thing** — by design. The first key is cast and *sealed*; the second operator reviews the change without seeing the first's verdict, so they can't anchor to it (PRD §10.1, FR-12). The consoles reconverge the instant both keys are in. This is the one deliberate break from "two operators, one truth," and it's the mechanism that makes the second signature worth more than the first.
 
+### 5.5 Shared vs. private composition (21 Jul 2026)
+Not every text field syncs the same way, and the difference is deliberate:
+
+- **The dispatch prompt is a joint draft.** While either seat composes it,
+  every keystroke streams to the other workstation (`PromptDraft`); both seats
+  are writing one shared instruction, and consent is only ever signalled
+  against text both can see.
+- **A no-go steer is one seat's signed position.** It stays private while
+  typed and becomes visible when cast, as part of the verdict. The other seat
+  reacts to it after the fact — with its own steer or a hand-edit — rather
+  than watching it form. Do not extend live draft-sync to steers; the privacy
+  is the point.
+
 ---
 
 ## 6. Screen states
