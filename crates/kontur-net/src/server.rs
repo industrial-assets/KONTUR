@@ -2447,33 +2447,6 @@ mod tests {
         let dh = wg.diff_hash;
 
         // Seat A tries to cast a verdict signed by op2 (not its authenticated key).
-        let drain = tokio::spawn({
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<ServerMsg>(64);
-            let t = tokio::spawn(async move {
-                while let Ok(Some(m)) = read_json::<_, ServerMsg>(&mut ca_reader).await {
-                    let _ = tx.send(m).await;
-                }
-            });
-            async move {
-                let mut got = false;
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-                while tokio::time::Instant::now() < deadline {
-                    if let Ok(Some(ServerMsg::Rejected { reason })) =
-                        tokio::time::timeout(Duration::from_millis(200), rx.recv())
-                            .await
-                            .map(|o| o)
-                    {
-                        if reason.contains("identity") {
-                            got = true;
-                            break;
-                        }
-                    }
-                }
-                t.abort();
-                got
-            }
-        });
-
         write_json(
             &mut ca_write,
             &ClientMsg::Cast {
@@ -2483,7 +2456,24 @@ mod tests {
         )
         .await
         .unwrap();
-        let got = drain.await.unwrap();
+
+        // The rejection with an identity reason arrives on A's stream.
+        let mut got = false;
+        for _ in 0..40 {
+            match tokio::time::timeout(
+                Duration::from_millis(200),
+                read_json::<_, ServerMsg>(&mut ca_reader),
+            )
+            .await
+            {
+                Ok(Ok(Some(ServerMsg::Rejected { reason }))) if reason.contains("identity") => {
+                    got = true;
+                    break;
+                }
+                Ok(Ok(Some(_))) => continue,
+                _ => break,
+            }
+        }
         assert!(got, "a foreign-identity cast must be rejected");
     }
 
