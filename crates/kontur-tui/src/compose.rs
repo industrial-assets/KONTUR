@@ -53,14 +53,6 @@ pub fn end(buf: &str) -> usize {
     char_len(buf)
 }
 
-/// The buffer with a visible cursor marker inserted at the cursor position,
-/// for display only.
-pub fn with_cursor_marker(buf: &str, cursor: usize) -> String {
-    let mut out = buf.to_owned();
-    out.insert(byte_at(buf, cursor), '▏');
-    out
-}
-
 /// Single-line rendering of a possibly multi-line buffer (notice row):
 /// newlines become a visible ⏎ so nothing is silently hidden.
 pub fn inline(buf: &str) -> String {
@@ -112,9 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn marker_and_inline_render() {
-        assert_eq!(with_cursor_marker("ab", 1), "a▏b");
-        assert_eq!(with_cursor_marker("аб", 2), "аб▏");
+    fn inline_render() {
         assert_eq!(inline("a\nb"), "a⏎b");
     }
 }

@@ -76,6 +76,8 @@ pub async fn build_session_view(
         show_help: false,
         agent_log: None,
         link_lost: false,
+        cursor: None,
+        blink_on: false,
     }
 }
 

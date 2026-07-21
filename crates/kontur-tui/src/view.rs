@@ -142,6 +142,15 @@ pub enum ActiveRegion {
     SessionClosed(AuditSummary),
 }
 
+/// Where the text-entry cursor sits while composing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorTarget {
+    /// On the command row: `col` is the 0-based column within that row.
+    Command { col: u16 },
+    /// In the PROMPT pane: `index` is the char offset into the draft.
+    Prompt { index: usize },
+}
+
 /// One clarification question as shown to an operator.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ClarifyQ {
@@ -188,6 +197,11 @@ pub struct SessionView {
     pub instruction: Option<String>,
     /// When true, a centred keymap overlay is drawn above the console.
     pub show_help: bool,
+    /// Where the text-entry cursor should be drawn, while composing. Rendered
+    /// only on the "on" frames of the blink cadence, giving a slow flash.
+    pub cursor: Option<CursorTarget>,
+    /// Whether this frame is a cursor-visible ("on") frame.
+    pub blink_on: bool,
     /// Host-only: path to the agent's session log, shown as a persistent
     /// footer so the host can tail the agent's narration. None on the operator
     /// console (the log is host-local and unreachable from there).

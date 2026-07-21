@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::diffview::styled_diff_lines;
-use crate::view::{ActiveRegion, Attention, KeyStatus, SessionView};
+use crate::view::{ActiveRegion, Attention, CursorTarget, KeyStatus, SessionView};
 
 /// Draw the whole console. Pure: no I/O, no engine calls.
 ///
@@ -66,6 +66,52 @@ pub fn render(
     // Help overlay sits above everything else.
     if view.show_help {
         help_overlay(frame, view);
+    }
+
+    // Text-entry caret: drawn only on "on" frames of the blink cadence, so the
+    // real terminal cursor flashes slowly at the insertion point.
+    if view.blink_on {
+        if let Some(pos) = caret_position(view, rows[5], rows[7]) {
+            frame.set_cursor_position(pos);
+        }
+    }
+}
+
+/// Screen position for the text-entry caret, given the panes area and the
+/// command row. `None` when not composing.
+fn caret_position(view: &SessionView, panes_area: Rect, command_row: Rect) -> Option<(u16, u16)> {
+    match view.cursor? {
+        CursorTarget::Command { col } => {
+            let x = command_row.x + col;
+            let max_x = command_row.x + command_row.width.saturating_sub(1);
+            Some((x.min(max_x), command_row.y))
+        }
+        CursorTarget::Prompt { index } => {
+            // The PROMPT pane is the right 65% of the panes area; its text
+            // renders inside a border with a one-space left margin.
+            let cols = Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .split(panes_area);
+            let pane = cols[1];
+            // Caret line/column within the draft.
+            let prompt = if let ActiveRegion::Prompt { prompt, .. } = &view.active {
+                prompt.as_str()
+            } else {
+                return None;
+            };
+            let before: String = prompt.chars().take(index).collect();
+            let line = before.matches('\n').count() as u16;
+            let col = before
+                .rsplit('\n')
+                .next()
+                .map(|l| l.chars().count())
+                .unwrap_or(0) as u16;
+            // +1 border, +1 leading space for x; +1 border for y.
+            let x = pane.x + 2 + col;
+            let y = pane.y + 1 + line;
+            let max_x = pane.x + pane.width.saturating_sub(1);
+            let max_y = pane.y + pane.height.saturating_sub(1);
+            Some((x.min(max_x), y.min(max_y)))
+        }
     }
 }
 
@@ -768,7 +814,34 @@ mod tests {
             show_help: false,
             agent_log: None,
             link_lost: false,
+            cursor: None,
+            blink_on: false,
         }
+    }
+
+    #[test]
+    fn caret_command_column() {
+        let mut v = minimal_view(ActiveRegion::Idle);
+        v.cursor = Some(CursorTarget::Command { col: 17 });
+        let cmd = ratatui::layout::Rect::new(0, 29, 120, 1);
+        let panes = ratatui::layout::Rect::new(0, 5, 120, 20);
+        assert_eq!(caret_position(&v, panes, cmd), Some((17, 29)));
+    }
+
+    #[test]
+    fn caret_prompt_line_and_column() {
+        let mut v = minimal_view(ActiveRegion::Prompt {
+            prompt: "fix parser\nthen tests".into(),
+            ready: [false, false],
+        });
+        // caret after "then " on line 1 (index = 10 nl + 5 = 16 -> col 5, line 1).
+        v.cursor = Some(CursorTarget::Prompt { index: 16 });
+        let panes = ratatui::layout::Rect::new(0, 5, 120, 20);
+        let cmd = ratatui::layout::Rect::new(0, 29, 120, 1);
+        let (x, y) = caret_position(&v, panes, cmd).unwrap();
+        // right pane x=42; +2 border/margin; col 5 -> x=49. y = 5 (pane top)
+        // +1 border +1 line = 7.
+        assert_eq!((x, y), (49, 7));
     }
 
     #[test]
