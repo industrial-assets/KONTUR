@@ -8,7 +8,7 @@ Two engineers, one console, a fleet of agents — and nothing ships without both
 
 ---
 
-<a href="https://www.producthunt.com/products/kontur?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-kontur" target="_blank" rel="noopener noreferrer"><img alt="Kontur - A brutalist CLI for high-efficiency agentic pair programming | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1201525&amp;theme=light&amp;t=1784629963161"></a>
+<a href="https://www.producthunt.com/products/kontur?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-kontur" target="_blank" rel="noopener noreferrer"><img alt="Kontur - A brutalist CLI for high-efficiency agentic pair programming | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1201525&amp;theme=dark&amp;t=1784629963161"></a>
 
 ---
 
