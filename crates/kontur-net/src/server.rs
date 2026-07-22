@@ -1732,7 +1732,13 @@ fn push_log(net: &mut Net, text: &str) {
     let ss = secs % 60;
     let entry = format!("{mm:02}:{ss:02} {text}");
     net.log.push_back(entry);
-    while net.log.len() > 8 {
+    // Retain the session's activity history so the LOG pane fills its height
+    // and scrolls all the way back to the start. Bounded so memory and the
+    // per-state wire size stay sane on the two-seat LAN/VPN link; the cap is
+    // far above a realistic supervised session. (Fetch-on-scroll for truly
+    // unbounded history can come later if ever needed.)
+    const LOG_HISTORY: usize = 1000;
+    while net.log.len() > LOG_HISTORY {
         net.log.pop_front();
     }
 }
@@ -1826,6 +1832,22 @@ mod tests {
         tasks: Vec<String>,
     ) -> (SessionServer, Arc<InMemoryWorkspace>) {
         make_server_with_prompt(op1, op2, tasks, "fix the thing")
+    }
+
+    // The activity log retains the session's history (past the old 8-line cap)
+    // so the LOG pane fills and scrolls back to the start.
+    #[tokio::test]
+    async fn log_retains_history_past_eight() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let (server, _ws) = make_server(op1, op2, vec!["t".into()]);
+        let mut net = server.inner.net.lock().await;
+        for i in 0..50 {
+            push_log(&mut net, &format!("line {i}"));
+        }
+        assert_eq!(net.log.len(), 50, "history is kept, not truncated at 8");
+        // The oldest line is still present (scrollable to the start).
+        assert!(net.log.front().unwrap().contains("line 0"));
     }
 
     fn make_server_with_prompt(
