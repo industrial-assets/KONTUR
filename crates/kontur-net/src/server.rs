@@ -696,6 +696,18 @@ async fn reader_task<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
         return;
     }
 
+    // The zero sentinel is only a configuration marker for a BYO seat, never a
+    // real identity — reject it as an incoming key so it cannot bypass approval
+    // by matching the configured (sentinel) seat directly.
+    if operator == OperatorId([0u8; 32]) {
+        let _ = conn_tx
+            .send(ServerMsg::Rejected {
+                reason: "invalid operator identity".into(),
+            })
+            .await;
+        return;
+    }
+
     // Seat claim is keyed on OperatorId. A key matching a configured seat is
     // seated directly. An unmatched key is accepted only for a BYO seat B
     // (configured with the zero sentinel), and only after the host approves it.
@@ -708,12 +720,11 @@ async fn reader_task<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
     let seat_idx = if let Some(i) = direct {
         i
     } else if server.inner.cfg.seats[1].1 == OperatorId([0u8; 32]) {
-        // BYO seat B (zero sentinel). NOTE (must close before BYO ships): host
-        // approval here gates *attachment*, not verdict acceptance. Before the
-        // binary ever sets this sentinel, gate acceptance must be constrained to
-        // the approved operator set (register the approved key with the GateHost
-        // and reject verdicts from keys outside it) — otherwise an approved
-        // fingerprint has no effect at the merge boundary.
+        // BYO seat B (zero sentinel). Approval gates attachment; verdict
+        // acceptance is separately constrained to the registered operator set
+        // (GateHost::submit_verdict) and each cast is bound to the connection's
+        // authenticated identity, so an approved fingerprint is load-bearing at
+        // the merge boundary.
         match resolve_byo_join(&server, operator, &conn_tx).await {
             Some(i) => i,
             None => return,
@@ -1944,6 +1955,179 @@ mod tests {
         // X is still the (only) pending join.
         let s = state_rx.borrow().clone();
         assert_eq!(s.pending_join.as_ref().unwrap().operator, byo_x);
+    }
+
+    /// A Hello presenting the zero sentinel as its identity is rejected — it
+    /// must not seat directly by matching a BYO seat's configured sentinel.
+    #[tokio::test]
+    async fn sentinel_identity_is_rejected_at_hello() {
+        let op_host = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let (server, _ws) = make_byo_server(op_host);
+
+        let (client_b, server_b) = tokio::io::duplex(65536);
+        server.attach(server_b).await;
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        let mut cb_reader = BufReader::new(cb_read);
+
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Hello {
+                seat: "B".into(),
+                operator: OperatorId([0u8; 32]),
+                protocol: crate::protocol::PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut rejected = false;
+        for _ in 0..8 {
+            match read_json::<_, ServerMsg>(&mut cb_reader).await.unwrap() {
+                Some(ServerMsg::Rejected { reason }) => {
+                    assert!(reason.contains("invalid operator"), "got: {reason}");
+                    rejected = true;
+                    break;
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(
+            rejected,
+            "the sentinel identity must be rejected, never seated"
+        );
+    }
+
+    /// Capstone: an approved BYO operator can actually sign a verdict the gate
+    /// accepts — approval registers the key end-to-end.
+    #[tokio::test]
+    async fn approved_byo_key_can_cast_and_satisfy() {
+        let op_host = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let byo = Ed25519Signer::from_seed([9; 32]).operator_id();
+        let (server, ws) = make_byo_server(op_host);
+        let mut state_rx = server.state_rx();
+
+        let agent = ScriptedAgent {
+            tasks: vec![ScriptedTask {
+                id: "t1".into(),
+                path: "src/guard.rs".into(),
+                contents: "// guard\n".into(),
+            }],
+        };
+        tokio::spawn(crate::agent::run_agent(agent, server.clone()));
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Hello {
+                seat: "A".into(),
+                operator: op_host,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Hello {
+                seat: "B".into(),
+                operator: byo,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Approve the BYO key.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| s.pending_join.is_some()),
+        )
+        .await
+        .expect("pending");
+        write_json(
+            &mut ca_write,
+            &ClientMsg::ResolveJoin {
+                operator: byo,
+                approve: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Dispatch + plan through to a gate.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::DispatchReady { .. })
+            }),
+        )
+        .await
+        .expect("DispatchReady");
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::PlanReview { .. })
+            }),
+        )
+        .await
+        .expect("PlanReview");
+        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        let gated = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| s.gate.is_some()),
+        )
+        .await
+        .expect("gate");
+        let wg = gated.gate.unwrap();
+        let gid = wg.gate_id;
+        let dh = wg.diff_hash;
+
+        // The approved BYO operator (seed 9) casts go, signed with its own key;
+        // the host (seed 1) casts go; the gate accepts and the task merges.
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Cast {
+                gate_id: gid.clone(),
+                verdict: cast_go(9, &gid, dh),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Cast {
+                gate_id: gid.clone(),
+                verdict: cast_go(1, &gid, dh),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Session closes merged — both keys satisfied the gate.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::Closed { .. })
+            }),
+        )
+        .await
+        .expect("closed after both keys");
+        assert!(
+            !ws.accepted_tasks().is_empty(),
+            "the approved BYO key's verdict satisfied the gate"
+        );
     }
 
     /// A rejected BYO key is closed, not seated.

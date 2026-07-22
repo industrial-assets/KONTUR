@@ -66,6 +66,12 @@ cd your-project && kontur --claude
 # a derived operator key and the pinned TLS cert fingerprint):
 kontur join kontur://…
 
+# Bring your own key (the host can't forge your second signature): the host runs
+# `kontur --byo`; you generate/keep a local key and join with it, then read your
+# fingerprint to the host to approve:
+kontur id                 # show your operator fingerprint (key stays in ~/.kontur)
+kontur join --byo kontur://…
+
 # Host without an agent (attach one manually later), or with the scripted demo agent:
 cd your-project && kontur
 cd your-project && kontur --demo-agent
@@ -81,7 +87,7 @@ kontur host --mem --prompt "initial text (editable in-console)"
 kontur join --addr host:7777 --seed 2
 ```
 
-**Console keys:** `?` help · `y` ready · `p` edit prompt · `j`/`k` scroll diff · `↑`/`↓` scroll log · `tab` select file · `c` claim gate · `d` discuss note · `z` AFK (away) · `g` go (2× if truncated) · `r` no-go+steer · `e` edit file · `l` invite LAN/WAN · `K` abandon (confirm) · `q` quit.  Press `?` any time for a phase-aware keymap.
+**Console keys:** `?` help · `y` ready · `p` edit prompt · `j`/`k` scroll diff · `↑`/`↓` scroll log · `tab` select file · `c` claim gate · `d` discuss note · `z` AFK (away) · `a`/`x` approve/reject BYO join · `g` go (2× if truncated) · `r` no-go+steer · `e` edit file · `l` invite LAN/WAN · `K` abandon (confirm) · `q` quit.  Press `?` any time for a phase-aware keymap.
 
 Invite codes carry the secret the operator's key is derived from — send privately; operator-supplied keys with host-side approval are future work.
 
