@@ -272,6 +272,11 @@ pub struct WireState {
     /// after dispatch (during plan review and execution), not only while it
     /// is being composed at the dispatch gate.
     pub prompt: String,
+    /// The approved task plan, carried through execution so the console can show
+    /// a persistent progress pane. Empty until a plan is approved.
+    pub plan: Vec<String>,
+    /// How many plan tasks have completed (their gate resolved `Satisfied`).
+    pub tasks_done: usize,
     /// A BYO operator awaiting the host's approval: (operator, fingerprint).
     /// Shown to the host so they can verify the fingerprint and approve.
     pub pending_join: Option<WirePendingJoin>,

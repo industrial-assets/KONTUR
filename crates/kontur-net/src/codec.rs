@@ -139,6 +139,8 @@ mod tests {
             log: vec!["started".to_string()],
             gate: None,
             prompt: String::new(),
+            plan: vec!["task one".to_string()],
+            tasks_done: 0,
             pending_join: None,
         }));
 

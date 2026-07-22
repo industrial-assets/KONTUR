@@ -165,6 +165,15 @@ pub enum CursorTarget {
     Prompt { index: usize },
 }
 
+/// The approved plan with execution progress, for the persistent PLAN pane.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PlanProgress {
+    pub tasks: Vec<String>,
+    /// Number of tasks completed (their gate resolved `Satisfied`). Tasks
+    /// `0..done` are done, `done` is the current task, the rest are pending.
+    pub done: usize,
+}
+
 /// One clarification question as shown to an operator.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ClarifyQ {
@@ -209,6 +218,10 @@ pub struct SessionView {
     /// plan review and execution so the ask stays visible after dispatch.
     /// None while composing (the PROMPT pane shows the draft) and at close.
     pub instruction: Option<String>,
+    /// The approved plan + progress, rendered as a persistent PLAN pane in the
+    /// left column during execution. None until a plan is approved / outside
+    /// execution.
+    pub plan: Option<PlanProgress>,
     /// When true, a centred keymap overlay is drawn above the console.
     pub show_help: bool,
     /// Where the text-entry cursor should be drawn, while composing. Rendered
