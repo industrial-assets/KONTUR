@@ -253,6 +253,18 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         _ => None,
     };
 
+    // Persistent progress: during execution the plan moves to a left-pane PLAN
+    // pane (the right pane is busy with the diff / working spinner). During
+    // plan review the editable list is already in the right pane, so we don't
+    // duplicate it here.
+    let plan = match &state.phase {
+        WirePhase::Executing if !state.plan.is_empty() => Some(crate::view::PlanProgress {
+            tasks: state.plan.clone(),
+            done: state.tasks_done.min(state.plan.len()),
+        }),
+        _ => None,
+    };
+
     SessionView {
         banner: Banner {
             session: "remote".into(),
@@ -267,6 +279,7 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         notice: None,
         attention: None,
         instruction,
+        plan,
         show_help: false,
         agent_log: None,
         link_lost: false,
@@ -584,6 +597,8 @@ pub async fn run_remote(
         log: vec![],
         gate: None,
         prompt: String::new(),
+        plan: vec![],
+        tasks_done: 0,
         pending_join: None,
     };
     let (state_tx, state_rx) = watch::channel(initial);
@@ -1464,6 +1479,8 @@ mod tests {
             log: vec![],
             gate: None,
             prompt: String::new(),
+            plan: vec![],
+            tasks_done: 0,
             pending_join: None,
         }
     }
@@ -1525,6 +1542,42 @@ mod tests {
             wire_to_view(&state, own, 0).active,
             ActiveRegion::Working { .. }
         ));
+    }
+
+    // During execution the plan moves to a persistent left-pane progress view.
+    #[test]
+    fn executing_shows_persistent_plan_progress() {
+        let own = op(1);
+        let mut state = base_state(WirePhase::Executing);
+        state.plan = vec!["a".into(), "b".into(), "c".into()];
+        state.tasks_done = 1;
+        let p = wire_to_view(&state, own, 0)
+            .plan
+            .expect("plan progress present during execution");
+        assert_eq!(p.tasks.len(), 3);
+        assert_eq!(p.done, 1);
+    }
+
+    // A completed count beyond the task count is clamped (defensive).
+    #[test]
+    fn plan_progress_done_is_clamped() {
+        let own = op(1);
+        let mut state = base_state(WirePhase::Executing);
+        state.plan = vec!["a".into(), "b".into()];
+        state.tasks_done = 9;
+        assert_eq!(wire_to_view(&state, own, 0).plan.unwrap().done, 2);
+    }
+
+    // During plan review the editable list is in the right pane; the left
+    // progress pane does not duplicate it.
+    #[test]
+    fn plan_review_does_not_duplicate_left_plan() {
+        let own = op(1);
+        let mut state = base_state(WirePhase::PlanReview {
+            tasks: vec!["a".into()],
+        });
+        state.plan = vec!["a".into()];
+        assert!(wire_to_view(&state, own, 0).plan.is_none());
     }
 
     // The instruction is surfaced after dispatch (PlanReview + Executing) and

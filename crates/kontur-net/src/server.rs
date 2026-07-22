@@ -110,6 +110,10 @@ struct Net {
     finalizing: bool,
     started: Instant,
     agent_plan: Option<Vec<String>>,
+    /// Count of tasks whose gate has resolved `Satisfied` — drives the
+    /// persistent PLAN progress pane. Sequential execution means this maps to
+    /// how far the fleet has worked through the approved plan.
+    tasks_done: usize,
     /// Live session prompt. Initialised from cfg.prompt; updated in-console by
     /// SetPrompt during DispatchReady. After dispatch it is locked — the agent
     /// is running against the text that was actually consented to.
@@ -196,6 +200,8 @@ impl SessionServer {
             log: vec![],
             gate: None,
             prompt: String::new(),
+            plan: vec![],
+            tasks_done: 0,
             pending_join: None,
         };
 
@@ -212,6 +218,7 @@ impl SessionServer {
             finalizing: false,
             started: Instant::now(),
             agent_plan: None,
+            tasks_done: 0,
             prompt: cfg.prompt.clone(),
             last_cmd: std::collections::HashMap::new(),
             claim: None,
@@ -344,9 +351,12 @@ impl SessionServer {
                     existing.status = "working".to_owned();
                     existing.needs_signoff = false;
                 }
+                // A satisfied gate = one more completed task (progress pane).
+                if matches!(state, HoldState::Satisfied) {
+                    net.tasks_done += 1;
+                }
                 drop(net);
                 // Still refresh so the fleet card update reaches clients.
-                let _ = state; // acknowledged, cast handler logs it
                 let _ = gate_id;
                 self.refresh_locked().await;
             }
@@ -1616,6 +1626,8 @@ impl SessionServer {
         let log: Vec<String> = net.log.iter().cloned().collect();
         let last_cmds = net.last_cmd.clone();
         let prompt_snapshot = net.prompt.clone();
+        let plan_snapshot = net.agent_plan.clone().unwrap_or_default();
+        let tasks_done_snapshot = net.tasks_done;
         let claim_snapshot = net.claim.clone();
         let discuss_snapshot = net.discuss.clone();
         let pending_join_snapshot = net.pending_join;
@@ -1693,6 +1705,8 @@ impl SessionServer {
             log,
             gate,
             prompt: prompt_snapshot,
+            plan: plan_snapshot,
+            tasks_done: tasks_done_snapshot,
             pending_join: pending_join_snapshot.map(|operator| WirePendingJoin {
                 operator,
                 fingerprint: operator.fingerprint(),
@@ -2237,7 +2251,7 @@ mod tests {
         .unwrap();
 
         // Session closes merged — both keys satisfied the gate.
-        tokio::time::timeout(
+        let closed = tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
                 matches!(s.phase, WirePhase::Closed { .. })
@@ -2248,6 +2262,12 @@ mod tests {
         assert!(
             !ws.accepted_tasks().is_empty(),
             "the approved BYO key's verdict satisfied the gate"
+        );
+        // Progress: the satisfied gate advanced the completed-task count that
+        // drives the persistent PLAN pane.
+        assert_eq!(
+            closed.tasks_done, 1,
+            "a satisfied gate increments the completed-task count"
         );
     }
 

@@ -324,6 +324,45 @@ fn task_bar(frame: &mut Frame, area: Rect, view: &SessionView) {
     );
 }
 
+/// Persistent progress pane: the approved plan with per-task markers
+/// (`✓` done · `▶` current · `·` pending) and a done/total count in the title.
+/// Windows around the current task when the list is taller than the pane.
+fn render_plan_progress(frame: &mut Frame, area: Rect, plan: &crate::view::PlanProgress) {
+    let total = plan.tasks.len();
+    let done = plan.done.min(total);
+    let vis = area.height.saturating_sub(2) as usize; // borders
+                                                      // Keep the current task (index == done) in view.
+    let start = if total <= vis {
+        0
+    } else {
+        done.saturating_sub(vis / 2).min(total.saturating_sub(vis))
+    };
+    let end = (start + vis).min(total);
+
+    let lines: Vec<Line> = plan.tasks[start..end]
+        .iter()
+        .enumerate()
+        .map(|(off, t)| {
+            let i = start + off;
+            let (marker, style) = if i < done {
+                ("✓", Style::default().add_modifier(Modifier::DIM))
+            } else if i == done {
+                ("▶", Style::default().add_modifier(Modifier::BOLD))
+            } else {
+                ("·", Style::default().add_modifier(Modifier::DIM))
+            };
+            Line::from(Span::styled(format!(" {marker} {} {t}", i + 1), style))
+        })
+        .collect();
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(format!("PLAN · {done}/{total}")))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 fn fleet(frame: &mut Frame, area: Rect, view: &SessionView) {
     let lines: Vec<Line> = view
         .fleet
@@ -405,10 +444,22 @@ fn panes(
     let cols =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).split(area);
 
-    // Left pane: TASK line (when an instruction is live) + fleet + log.
+    // Left pane: TASK line + persistent PLAN progress + fleet + log. The PLAN
+    // pane takes up to 12 rows but never eats into the fleet's 5 or the log's
+    // minimum 3 (it drops to 0 when the column is too short), so progress never
+    // starves the always-visible log.
     let task_rows: u16 = if view.instruction.is_some() { 3 } else { 0 };
+    let plan_rows: u16 = match &view.plan {
+        Some(p) => {
+            let want = (p.tasks.len() as u16 + 2).min(12);
+            let reserved = task_rows + 5 + 3;
+            want.min(cols[0].height.saturating_sub(reserved))
+        }
+        None => 0,
+    };
     let left = Layout::vertical([
         Constraint::Length(task_rows),
+        Constraint::Length(plan_rows),
         Constraint::Length(5),
         Constraint::Min(3),
     ])
@@ -416,8 +467,13 @@ fn panes(
     if task_rows > 0 {
         task_bar(frame, left[0], view);
     }
-    fleet(frame, left[1], view);
-    log(frame, left[2], view, log_scroll);
+    if plan_rows > 0 {
+        if let Some(p) = &view.plan {
+            render_plan_progress(frame, left[1], p);
+        }
+    }
+    fleet(frame, left[2], view);
+    log(frame, left[3], view, log_scroll);
 
     // Right pane: gate surface or phase card.
     match &view.active {
@@ -879,6 +935,7 @@ mod tests {
             notice: None,
             attention: None,
             instruction: None,
+            plan: None,
             show_help: false,
             agent_log: None,
             link_lost: false,

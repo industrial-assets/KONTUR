@@ -1,8 +1,8 @@
 use kontur_core::OperatorId;
 use kontur_tui::render::render;
 use kontur_tui::view::{
-    ActiveRegion, Attention, AuditSummary, Banner, GateCard, KeyStatus, KeyView, Role, SessionView,
-    Station, StatusStrip,
+    ActiveRegion, Attention, AuditSummary, Banner, GateCard, KeyStatus, KeyView, PlanProgress,
+    Role, SessionView, Station, StatusStrip,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -62,6 +62,7 @@ fn base(active: ActiveRegion) -> SessionView {
         blink_on: false,
         spinner_frame: 0,
         join_request: None,
+        plan: None,
     }
 }
 
@@ -77,6 +78,23 @@ fn banner_and_status_render() {
     assert!(s.contains("КОНТУР-1"));
     assert!(s.contains("4-EYES ON"));
     assert!(s.contains("NEEDS YOU"));
+}
+
+#[test]
+fn plan_progress_pane_shows_markers_and_count() {
+    let mut view = base(ActiveRegion::Working {
+        note: "agent is working".into(),
+    });
+    view.instruction = Some("do the thing".into());
+    view.plan = Some(PlanProgress {
+        tasks: vec!["one".into(), "two".into(), "three".into()],
+        done: 1,
+    });
+    let s = draw(&view);
+    assert!(s.contains("PLAN · 1/3"), "title shows done/total");
+    assert!(s.contains("✓ 1 one"), "done task marked");
+    assert!(s.contains("▶ 2 two"), "current task marked");
+    assert!(s.contains("· 3 three"), "pending task marked");
 }
 
 #[test]

@@ -195,6 +195,17 @@ The agent analyses and returns a task list — a DAG of bounded, single-concern 
 ### 6.4 Execution — the watch-floor
 The default working view. Agents run through tasks sequentially; the fleet is calm except where a human is needed. Between gates — while an agent is producing the next change — the right pane shows the calm AGENT spinner panel (see §6.3) rather than a bare idle pane.
 
+> **Implemented (2026-07-22):** the approved plan stays visible as a persistent **PLAN** pane in the left column throughout execution, so operators can see progress at a glance. Each task carries a marker — `✓` done · `▶` current · `·` pending — and the title shows a `done/total` count; the completed count advances as each task's gate resolves `go`. If the list is taller than the pane it windows around the current task. The pane yields to the fleet and the always-visible LOG when the column is short.
+>
+> ```
+>  ┌ PLAN · 2/4 ───────────────────┐
+>  │  ✓ 1 add caching              │
+>  │  ✓ 2 write tests              │
+>  │  ▶ 3 thread expiry into guard │
+>  │  · 4 regression: expiry path  │
+>  └───────────────────────────────┘
+> ```
+
 ```
  LINK BOTH-STATIONS SYNC || 4-EYES ON || FLEET 3 (1 NEEDS YOU)
 ------------------------------------------------------------------------
