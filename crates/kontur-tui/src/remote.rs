@@ -248,6 +248,7 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         link_lost: false,
         cursor: None,
         blink_on: false,
+        join_request: None,
     }
 }
 
@@ -630,6 +631,18 @@ pub async fn run_remote(
         view.show_help = show_help;
         view.agent_log = agent_log.clone();
         view.link_lost = !connected_rx.load(Ordering::Relaxed);
+        // Host-only: surface a pending BYO join for approval. The host is the
+        // seat whose operator matches state.seats[0].
+        let is_host = state
+            .seats
+            .first()
+            .map(|s| s.operator == own)
+            .unwrap_or(false);
+        view.join_request = if is_host {
+            state.pending_join.as_ref().map(|p| p.fingerprint.clone())
+        } else {
+            None
+        };
         // The invite is decision-relevant only while the stations are not both
         // linked; the moment they are, it disappears (calm default).
         if !view.status.linked {
@@ -994,6 +1007,32 @@ pub async fn run_remote(
             }
             Some(Action::LogDown) => {
                 log_scroll = log_scroll.saturating_sub(1);
+            }
+
+            // Host-only: approve / reject a pending BYO operator's join.
+            Some(Action::ApproveJoin) => {
+                if let Some(pj) = &state.pending_join {
+                    let is_host = state
+                        .seats
+                        .first()
+                        .map(|s| s.operator == own)
+                        .unwrap_or(false);
+                    if is_host {
+                        let _ = client.resolve_join(pj.operator, true).await;
+                    }
+                }
+            }
+            Some(Action::RejectJoin) => {
+                if let Some(pj) = &state.pending_join {
+                    let is_host = state
+                        .seats
+                        .first()
+                        .map(|s| s.operator == own)
+                        .unwrap_or(false);
+                    if is_host {
+                        let _ = client.resolve_join(pj.operator, false).await;
+                    }
+                }
             }
 
             // Toggle this seat's AFK presence.

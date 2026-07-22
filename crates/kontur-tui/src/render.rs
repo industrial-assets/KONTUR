@@ -46,6 +46,16 @@ pub fn render(
             ))),
             rows[0],
         );
+    } else if let Some(fp) = &view.join_request {
+        // A BYO operator awaits approval — the host must verify the fingerprint
+        // out-of-band and decide. Loud until resolved.
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" JOIN REQUEST — Operator B fingerprint {fp} · [a] approve · [x] reject"),
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            ))),
+            rows[0],
+        );
     } else {
         banner(frame, rows[0], view);
     }
@@ -818,6 +828,7 @@ mod tests {
             link_lost: false,
             cursor: None,
             blink_on: false,
+            join_request: None,
         }
     }
 

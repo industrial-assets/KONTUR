@@ -25,6 +25,7 @@ async fn main() -> std::io::Result<()> {
 
         Some("demo") => run(Demo::new()).await,
         Some("audit") => audit_cmd(&args[2..]),
+        Some("id") => id_cmd(),
         Some("mcp-bridge") => mcp_bridge_cmd(&args[2..]).await,
         Some("host") => host_cmd(&args[2..]).await,
         Some("join") => join_cmd(&args[2..]).await,
@@ -41,6 +42,18 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/// Print this machine's operator fingerprint (creating the key on first use).
+/// The private key never leaves ~/.kontur/operator_key and is never printed —
+/// read the fingerprint to the host so they can approve your BYO join.
+fn id_cmd() -> std::io::Result<()> {
+    let seed = kontur_tui::keystore::load_or_create_operator_seed()?;
+    let op = Ed25519Signer::from_seed(seed).operator_id();
+    let path = kontur_tui::keystore::key_path()?;
+    println!("operator fingerprint: {}", op.fingerprint());
+    println!("key file: {} (private — never share)", path.display());
+    Ok(())
 }
 
 /// stdio<->TCP bridge for Claude Code's MCP transport. Claude spawns
@@ -115,6 +128,7 @@ fn print_usage() {
         "Usage:
   kontur                              # zero-config: host in current git repo
   kontur audit <file.json>            # verify a persisted audit chain
+  kontur id                           # show your operator fingerprint (BYO)
   kontur mcp-bridge <port>            # stdio<->TCP bridge for Claude Code (internal)
   kontur host [--repo <path>] [--mem] [--operator-port 7777] [--agent-port 7778]
               [--prompt \"...\"] [--claude | --demo-agent] [--seeds <hex32a,hex32b>]
@@ -145,6 +159,7 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
     let mut explicit_seeds: Option<([u8; 32], [u8; 32])> = None;
     let mut session: Option<String> = None;
     let mut headless = false;
+    let mut byo = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -197,6 +212,9 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
             }
             "--headless" => {
                 headless = true;
+            }
+            "--byo" => {
+                byo = true;
             }
             other => {
                 return Err(err(format!("kontur host: unknown flag '{other}'")));
@@ -278,9 +296,16 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
     // The server refuses dispatch while it is empty.
     let effective_prompt = prompt.unwrap_or_default();
 
-    // Derive operators from seeds.
+    // Derive operators from seeds. In BYO mode seat B brings its own key,
+    // approved by the host at join, so it is configured as the zero sentinel
+    // and starts out of the operator roster (added on approval).
     let op_a = Ed25519Signer::from_seed(seed_a).operator_id();
-    let op_b = Ed25519Signer::from_seed(seed_b).operator_id();
+    let op_b = if byo {
+        kontur_core::OperatorId([0u8; 32])
+    } else {
+        Ed25519Signer::from_seed(seed_b).operator_id()
+    };
+    let roster = if byo { vec![op_a] } else { vec![op_a, op_b] };
 
     // Build session context + workspace.
     let ctx = SessionContext::new(
@@ -289,7 +314,7 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
         "agent-01",
         "external",
         "1.0",
-        vec![op_a, op_b],
+        roster,
     );
 
     let host: Arc<GateHost> = if mem || effective_repo.is_none() {
@@ -543,10 +568,13 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
     let (invite_link, remote_link) = match &seed_mode {
         SeedMode::Explicit(_, _) => (None, None),
         SeedMode::Derived { secret_b, .. } => {
-            let link = format_invite(&ip, op_addr.port(), secret_b, &fp16);
+            // In BYO mode the operator uses their own key, so the link carries
+            // no usable identity secret — only the address and the TLS pin.
+            let secret = if byo { &[0u8; 16] } else { secret_b };
+            let link = format_invite(&ip, op_addr.port(), secret, &fp16);
             let remote = match &public_ip {
                 Some(pubip) if Some(pubip) != lan_ip.as_ref() => {
-                    Some(format_invite(pubip, op_addr.port(), secret_b, &fp16))
+                    Some(format_invite(pubip, op_addr.port(), secret, &fp16))
                 }
                 _ => None,
             };
@@ -559,9 +587,22 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
     println!("  operator port : {op_addr}");
     println!("  agent port    : {agent_addr}");
     println!();
+    if byo {
+        println!("  BYO keys ON — the operator brings their own key; you approve its fingerprint.");
+    }
     if let Some(ref link) = invite_link {
-        println!("  invite your operator — send them this (over a private channel; the link IS their key):");
-        println!("    kontur join {link}");
+        if byo {
+            println!(
+                "  send your operator this link; they join with --byo (their key, not the link's):"
+            );
+            println!("    kontur join --byo {link}");
+            println!(
+                "  they will read you a fingerprint; verify it, then approve with [a] in-console."
+            );
+        } else {
+            println!("  invite your operator — send them this (over a private channel; the link IS their key):");
+            println!("    kontur join {link}");
+        }
         if let Some(remote) = &remote_link {
             println!();
             println!(
@@ -605,16 +646,22 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
         let links = match &seed_mode {
             SeedMode::Explicit(_, _) => None,
             SeedMode::Derived { secret_b, .. } => {
+                let secret = if byo { &[0u8; 16] } else { secret_b };
+                let join = if byo {
+                    "kontur join --byo"
+                } else {
+                    "kontur join"
+                };
                 let lan_cmd = lan_ip
                     .as_ref()
                     .map(|lip| {
                         format!(
-                            "kontur join {}",
-                            format_invite(lip, op_addr.port(), secret_b, &fp16)
+                            "{join} {}",
+                            format_invite(lip, op_addr.port(), secret, &fp16)
                         )
                     })
                     .or_else(|| invite_link.as_ref().map(|l| format!("kontur join {l}")));
-                let wan_cmd = remote_link.as_ref().map(|r| format!("kontur join {r}"));
+                let wan_cmd = remote_link.as_ref().map(|r| format!("{join} {r}"));
                 Some(kontur_tui::link::InviteLinks {
                     lan: lan_cmd,
                     wan: wan_cmd,
@@ -643,14 +690,27 @@ async fn host_cmd(args: &[String]) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn join_cmd(args: &[String]) -> std::io::Result<()> {
-    // If the first arg looks like a kontur:// link, parse it directly.
-    if let Some(first) = args.first() {
-        if first.starts_with("kontur://") {
-            let (addr, secret16, fp16) =
-                parse_invite(first).map_err(|e| err(format!("invalid invite link: {e}")))?;
-            let seed = derive_seed(&secret16);
-            return run_remote(&addr, "Operator B".into(), seed, None, Some(fp16), None).await;
-        }
+    // `--byo` uses this machine's own persistent key (approved by the host)
+    // instead of the identity derived from the invite secret.
+    let byo = args.iter().any(|a| a == "--byo");
+    let link = args.iter().find(|a| a.starts_with("kontur://"));
+
+    if let Some(link) = link {
+        let (addr, secret16, fp16) =
+            parse_invite(link).map_err(|e| err(format!("invalid invite link: {e}")))?;
+        let seed = if byo {
+            let seed = kontur_tui::keystore::load_or_create_operator_seed()?;
+            let op = Ed25519Signer::from_seed(seed).operator_id();
+            println!(
+                "your operator fingerprint: {} — read this to the host to approve your join.",
+                op.fingerprint()
+            );
+            println!("waiting for host approval…");
+            seed
+        } else {
+            derive_seed(&secret16)
+        };
+        return run_remote(&addr, "Operator B".into(), seed, None, Some(fp16), None).await;
     }
 
     // Legacy form: kontur join --addr X --seed N (no TLS — deprecated path)

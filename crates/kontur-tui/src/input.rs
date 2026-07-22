@@ -56,6 +56,9 @@ pub enum Action {
     ClaimGate,
     /// Toggle this seat's AFK (away-from-keyboard) presence flag.
     ToggleAfk,
+    /// Host-only: approve / reject a pending BYO operator's join request.
+    ApproveJoin,
+    RejectJoin,
     /// Move the highlighted clarification question.
     ClarifyNext,
     ClarifyPrev,
@@ -136,6 +139,8 @@ pub fn map_key(
         KeyCode::Char('c') => Action::ClaimGate,
         KeyCode::Char('l') => Action::ToggleLink,
         KeyCode::Char('z') => Action::ToggleAfk,
+        KeyCode::Char('a') => Action::ApproveJoin,
+        KeyCode::Char('x') => Action::RejectJoin,
         KeyCode::Tab => Action::CycleFile,
         KeyCode::Char('y') => Action::Ready,
         KeyCode::Char('p') => Action::PromptBegin,
@@ -186,9 +191,18 @@ mod tests {
             map_key(KeyCode::Char('z'), KeyModifiers::NONE, false, false, false),
             Action::ToggleAfk
         );
-        // An genuinely-unmapped key stays None.
+        // Host-only BYO approval keys.
+        assert_eq!(
+            map_key(KeyCode::Char('a'), KeyModifiers::NONE, false, false, false),
+            Action::ApproveJoin
+        );
         assert_eq!(
             map_key(KeyCode::Char('x'), KeyModifiers::NONE, false, false, false),
+            Action::RejectJoin
+        );
+        // A genuinely-unmapped key stays None.
+        assert_eq!(
+            map_key(KeyCode::Char('w'), KeyModifiers::NONE, false, false, false),
             Action::None
         );
     }

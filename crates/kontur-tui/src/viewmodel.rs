@@ -78,6 +78,7 @@ pub async fn build_session_view(
         link_lost: false,
         cursor: None,
         blink_on: false,
+        join_request: None,
     }
 }
 

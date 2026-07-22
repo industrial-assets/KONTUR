@@ -406,6 +406,13 @@ impl GateHost {
             .position(|e| e.hold.gate_id() == gate_id)
             .ok_or_else(|| GateHostError::UnknownGate(gate_id.0.clone()))?;
 
+        // Enforce the session roster at the gate boundary: only registered
+        // operators (the two seat keys — for BYO seat B, the host-approved key)
+        // may satisfy a gate. Closes the case where an unregistered key reaches
+        // the engine; the sentinel is never in the roster, so it is refused.
+        if !st.ctx.operators.contains(&cv.operator) {
+            return Err(GateHostError::Cast(kontur_core::CastRejected::Ineligible));
+        }
         let ev = st.holds[idx].hold.version();
         let outcome = st.holds[idx].hold.cast(ev, cv)?;
         st.holds[idx].escalation_required = outcome.escalation_required;
@@ -977,6 +984,34 @@ mod tests {
             }
             other => panic!("expected Command event, got {other:?}"),
         }
+    }
+
+    /// A verdict from an operator not in the session roster is refused at the
+    /// gate boundary (even with a valid signature over the right gate/diff).
+    #[tokio::test]
+    async fn unregistered_operator_verdict_is_refused() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        // Roster is only {op1, op2}. A third, unregistered signer (seed 7).
+        let context = ctx(vec![op1, op2]);
+        let host = GateHost::new(context.clone(), ws.clone());
+        let (gid, dh) = open_a_gate(&host, &ws, &context).await;
+
+        let stranger = go_verdict(7, &gid, dh); // seed 7 not in the roster
+        let err = host.submit_verdict(&gid, stranger).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GateHostError::Cast(kontur_core::CastRejected::Ineligible)
+            ),
+            "unregistered operator must be refused; got {err:?}"
+        );
+        // A registered operator is still accepted.
+        assert!(host
+            .submit_verdict(&gid, go_verdict(1, &gid, dh))
+            .await
+            .is_ok());
     }
 
     fn go_verdict(seed: u8, gate_id: &GateId, dh: Hash) -> CastVerdict {

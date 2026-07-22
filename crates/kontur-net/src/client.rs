@@ -198,6 +198,15 @@ impl SessionClient {
         self.send(ClientMsg::SetAfk { afk }).await
     }
 
+    pub async fn resolve_join(
+        &self,
+        operator: kontur_core::OperatorId,
+        approve: bool,
+    ) -> io::Result<()> {
+        self.send(ClientMsg::ResolveJoin { operator, approve })
+            .await
+    }
+
     pub async fn answer(
         &self,
         question: usize,

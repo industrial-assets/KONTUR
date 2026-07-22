@@ -8,6 +8,7 @@ pub mod demo;
 pub mod diffview;
 pub mod fleet;
 pub mod input;
+pub mod keystore;
 pub mod link;
 pub mod planedit;
 pub mod remote;

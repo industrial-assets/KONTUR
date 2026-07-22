@@ -210,6 +210,9 @@ pub struct SessionView {
     /// timeout — the session is frozen. Renders a loud banner in place of the
     /// identity header so the operator knows their casts won't land.
     pub link_lost: bool,
+    /// Host-only: a BYO operator awaiting approval — the fingerprint to verify.
+    /// Rendered as a loud approval prompt; None on the operator console.
+    pub join_request: Option<String>,
 }
 
 #[cfg(test)]

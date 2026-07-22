@@ -60,6 +60,7 @@ fn base(active: ActiveRegion) -> SessionView {
         link_lost: false,
         cursor: None,
         blink_on: false,
+        join_request: None,
     }
 }
 
@@ -653,4 +654,17 @@ fn station_shows_afk() {
     view.stations[1].afk = true;
     let s = draw(&view);
     assert!(s.contains("AFK"), "AFK badge must render; got:\n{s}");
+}
+
+/// The host console shows a loud JOIN REQUEST approval banner when a BYO
+/// operator is awaiting approval.
+#[test]
+fn join_request_banner_renders() {
+    let mut view = base(ActiveRegion::Idle);
+    assert!(!draw(&view).contains("JOIN REQUEST"));
+    view.join_request = Some("a1:b2:c3:d4:e5:f6:07:18".into());
+    let s = draw(&view);
+    assert!(s.contains("JOIN REQUEST"), "banner must render; got:\n{s}");
+    assert!(s.contains("a1:b2:c3:d4:e5:f6:07:18"), "fingerprint shown");
+    assert!(s.contains("[a] approve") && s.contains("[x] reject"));
 }
