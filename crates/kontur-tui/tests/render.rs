@@ -77,7 +77,7 @@ fn draw(view: &SessionView) -> String {
 #[test]
 fn banner_and_status_render() {
     let s = draw(&base(ActiveRegion::Idle));
-    assert!(s.contains("КОНТУР-1"));
+    assert!(s.contains("КОНТУР"));
     assert!(s.contains("4-EYES ON"));
     assert!(s.contains("NEEDS YOU"));
 }
@@ -680,7 +680,7 @@ fn host_lost_replaces_banner_with_loud_alert() {
         "loud alert must replace the banner; got:\n{s}"
     );
     assert!(
-        !s.contains("КОНТУР-1  //"),
+        !s.contains("КОНТУР  //"),
         "identity flourish yields to the alert"
     );
 }

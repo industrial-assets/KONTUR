@@ -4,7 +4,7 @@ Guidance for Codex (and any agent) working in this repository. Read it before ma
 
 ---
 
-## Project: Kontur (КОНТУР-1)
+## Project: Kontur (КОНТУР)
 
 **A brutalist CLI for high-efficiency agentic pair programming.**
 

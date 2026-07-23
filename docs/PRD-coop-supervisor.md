@@ -1,4 +1,4 @@
-# PRD — Kontur (КОНТУР-1)
+# PRD — Kontur (КОНТУР)
 
 > A terminal-native tool that lets **two engineers jointly supervise a shared fleet of coding agents** on the same codebase, with human review gated at each step and a tamper-evident audit trail.
 
@@ -277,7 +277,7 @@ The market splits into two camps, and neither is this:
 
 ## 14. Open questions
 
-1. **Naming — chosen: Kontur** (styled КОНТУР-1 / KONTUR-1). Operational / control-room register, matching §10.2. (Alternates considered: Keypair, Soyuz, Containment.)
+1. **Naming — chosen: Kontur** (styled КОНТУР / KONTUR). Operational / control-room register, matching §10.2. (Alternates considered: Keypair, Soyuz, Containment.)
 2. **Independence policy default** — strict (author may not check) vs pragmatic (author may be one of two)?
 3. **Dispatch gate** — the prompt-side flow is currently one arrow; needs its own mini-spec (what "well-specified" means, and its approval bar).
 4. **Attach protocol** — the multi-client state-sync + claim/arbitration model. The load-bearing engineering piece.
