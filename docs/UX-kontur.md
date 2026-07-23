@@ -1,4 +1,4 @@
-# UX Document — Kontur (КОНТУР-1)
+# UX Document — Kontur (КОНТУР)
 
 > The experience of two engineers sitting at one console, supervising a fleet of coding agents. Derived from the Kontur PRD; read alongside it (this doc owns the *how it feels and behaves*, the PRD owns the *what and why*).
 
@@ -49,7 +49,7 @@ Persistent chrome, top to bottom. Regions are fixed; only their contents change 
 
 ```
 ========================================================================
-[ КОНТУР-1  //  co-op session 4417  //  v0.4.2 ]      ← BANNER  (identity)
+[ КОНТУР  //  co-op session 4417  //  v0.4.2 ]      ← BANNER  (identity)
 ========================================================================
  LINK BOTH-STATIONS SYNC || 4-EYES ON || FLEET 3 (1 NEEDS YOU)
 ------------------------------------------------------------------------   ← STATUS STRIP
@@ -120,7 +120,7 @@ Both linked, no fleet, empty prompt buffer. The console invites an instruction.
 
 ```
 ========================================================================
-[ КОНТУР-1  //  co-op session 4417  //  v0.4.2 ]
+[ КОНТУР  //  co-op session 4417  //  v0.4.2 ]
 ========================================================================
  LINK BOTH-STATIONS SYNC || 4-EYES ON || FLEET 0 || IDLE
 ------------------------------------------------------------------------
@@ -347,7 +347,7 @@ Because two distinct keys are structurally required, losing an operator *stalls 
 
 ## 8. Micro-copy & tone
 
-Terse, operational, lower-case for machine chatter, plain English for anything functional. Verbs are actions (`dispatch`, `cast`, `steer`, `hand-edit`), not marketing. No exclamation-driven urgency; the layout carries emphasis, not the words. The identity register (КОНТУР-1, session numbers, version stamp) is confined to the banner. If a label reads like set dressing, it gets cut.
+Terse, operational, lower-case for machine chatter, plain English for anything functional. Verbs are actions (`dispatch`, `cast`, `steer`, `hand-edit`), not marketing. No exclamation-driven urgency; the layout carries emphasis, not the words. The identity register (КОНТУР, session numbers, version stamp) is confined to the banner. If a label reads like set dressing, it gets cut.
 
 ---
 

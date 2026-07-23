@@ -28,9 +28,7 @@ pub fn boot_lines(version: &str) -> Vec<Line<'static>> {
         .map(|row| Line::styled((*row).to_owned(), bold))
         .collect();
     lines.push(Line::raw(""));
-    lines.push(Line::raw(format!(
-        "КОНТУР-1 · v{version} · two keys, always"
-    )));
+    lines.push(Line::raw(format!("КОНТУР · v{version} · two keys, always")));
     lines.push(Line::raw(""));
     lines.push(Line::raw(
         "© 2026 Industrial Assets · open source · no warranty",
@@ -79,7 +77,7 @@ mod tests {
             .collect();
         // Wordmark rows present (first row of the block glyphs).
         assert!(text.contains("██╗  ██╗ ██████╗"));
-        assert!(text.contains("КОНТУР-1 · v0.1.0"));
+        assert!(text.contains("КОНТУР · v0.1.0"));
         assert!(text.contains("© 2026 Industrial Assets"));
         assert!(text.contains("open source"));
         assert!(text.contains("github.com/industrial-assets/kontur"));

@@ -1,4 +1,4 @@
-# Contributing to Kontur (КОНТУР-1)
+# Contributing to Kontur (КОНТУР)
 
 Thanks for helping build Kontur. This project lives and dies by one guarantee —
 **nothing reaches `main` without independent human review** — so the way we take

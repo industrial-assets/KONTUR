@@ -267,7 +267,7 @@ fn invite(frame: &mut Frame, area: Rect, link: &str) {
 
 fn banner(frame: &mut Frame, area: Rect, view: &SessionView) {
     let text = format!(
-        "[ КОНТУР-1  //  co-op session {}  //  v{} ]",
+        "[ КОНТУР  //  co-op session {}  //  v{} ]",
         view.banner.session, view.banner.version
     );
     frame.render_widget(
