@@ -265,6 +265,24 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         _ => None,
     };
 
+    // Peer-version nudge: compare this seat's version to the other seat's.
+    // Advisory only; empty versions (old peer) yield nothing.
+    let version_notice = {
+        let own_ver = state
+            .seats
+            .iter()
+            .find(|s| s.operator == own)
+            .map(|s| s.version.as_str())
+            .unwrap_or("");
+        let peer_ver = state
+            .seats
+            .iter()
+            .find(|s| s.operator != own)
+            .map(|s| s.version.as_str())
+            .unwrap_or("");
+        crate::update::peer_version_notice(own_ver, peer_ver)
+    };
+
     SessionView {
         banner: Banner {
             session: "remote".into(),
@@ -287,7 +305,7 @@ pub fn wire_to_view(state: &WireState, own: OperatorId, plan_sel: usize) -> Sess
         blink_on: false,
         spinner_frame: 0,
         join_request: None,
-        version_notice: None,
+        version_notice,
     }
 }
 
@@ -2055,6 +2073,69 @@ mod tests {
     }
 
     // ---- compose_notice: every compose mode has a visible input line ----
+
+    #[test]
+    fn peer_version_mismatch_shows_in_footer() {
+        let mut state = base_state(WirePhase::DispatchReady {
+            prompt: "test".into(),
+        });
+        // Two seats on different releases.
+        state.seats = vec![
+            WireSeat {
+                label: "Operator A [Host]".into(),
+                operator: OperatorId([1; 32]),
+                role: WireRole::Host,
+                linked: true,
+                ready: false,
+                afk: false,
+                version: "0.1.0".into(),
+            },
+            WireSeat {
+                label: "Operator B".into(),
+                operator: OperatorId([2; 32]),
+                role: WireRole::Operator,
+                linked: true,
+                ready: false,
+                afk: false,
+                version: "0.1.1".into(),
+            },
+        ];
+        // View from seat A's perspective.
+        let view = wire_to_view(&state, OperatorId([1; 32]), 0);
+        assert_eq!(
+            view.version_notice,
+            Some("peer v0.1.1 · you v0.1.0 — align versions".to_string())
+        );
+    }
+
+    #[test]
+    fn matching_versions_show_no_footer() {
+        let mut state = base_state(WirePhase::DispatchReady {
+            prompt: "test".into(),
+        });
+        state.seats = vec![
+            WireSeat {
+                label: "A".into(),
+                operator: OperatorId([1; 32]),
+                role: WireRole::Host,
+                linked: true,
+                ready: false,
+                afk: false,
+                version: "0.1.0".into(),
+            },
+            WireSeat {
+                label: "B".into(),
+                operator: OperatorId([2; 32]),
+                role: WireRole::Operator,
+                linked: true,
+                ready: false,
+                afk: false,
+                version: "0.1.0".into(),
+            },
+        ];
+        let view = wire_to_view(&state, OperatorId([1; 32]), 0);
+        assert_eq!(view.version_notice, None);
+    }
 
     #[test]
     fn every_compose_mode_renders_a_notice() {

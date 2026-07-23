@@ -792,7 +792,12 @@ async fn reader_task<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
     {
         let mut net = server.inner.net.lock().await;
         net.seats[seat_idx].linked = true;
-        net.seats[seat_idx].version = client_version.clone();
+        // Only update the version from Hello when non-empty; the host seat's
+        // version is pre-populated at server init from CARGO_PKG_VERSION and
+        // must not be overwritten by an empty client_version.
+        if !client_version.is_empty() {
+            net.seats[seat_idx].version = client_version.clone();
+        }
 
         // Both linked for first time → advance to DispatchReady
         if net.phase == Phase::AwaitOperators && net.seats[0].linked && net.seats[1].linked {
@@ -6011,6 +6016,86 @@ mod tests {
             stored,
             Some(edited.clone()),
             "host.proposed_plan() must equal edited list; got {stored:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // client_version propagates to WireState.seats
+    // -----------------------------------------------------------------------
+
+    /// A client that sends a non-empty client_version in its Hello must have
+    /// that version appear on the operator seat in the broadcast WireState.
+    /// The host seat carries env!("CARGO_PKG_VERSION") from server init.
+    #[tokio::test]
+    async fn client_version_propagates_to_wire_state() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["t1".into()]);
+        let mut state_rx = server.state_rx();
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        // Host connects with an empty client_version (simulates host path
+        // where the version is set at server init, not via Hello).
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Hello {
+                seat: "A".into(),
+                operator: op1,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                client_version: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Operator connects with a specific client_version.
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Hello {
+                seat: "B".into(),
+                operator: op2,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                client_version: "9.9.9".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Wait until both seats are linked (DispatchReady) so the WireState
+        // has been broadcast with both seat versions populated.
+        let state = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::DispatchReady { .. })
+            }),
+        )
+        .await
+        .expect("timed out waiting for DispatchReady");
+
+        // Operator seat (index 1) must carry the version from the Hello.
+        assert_eq!(
+            state.seats[1].version, "9.9.9",
+            "operator seat must carry the client_version from Hello"
+        );
+
+        // Host seat (index 0) carries the server's own CARGO_PKG_VERSION,
+        // set at server init — not overwritten by an empty Hello client_version.
+        assert_eq!(
+            state.seats[0].version,
+            env!("CARGO_PKG_VERSION"),
+            "host seat must carry CARGO_PKG_VERSION from server init"
         );
     }
 }
