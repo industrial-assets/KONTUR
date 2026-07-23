@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/kontur-core", "crates/kontur-mcp", "crates/kontur-net", "crates/kontur-tui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

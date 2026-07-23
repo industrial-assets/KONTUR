@@ -33,6 +33,10 @@ async fn main() -> std::io::Result<()> {
             print_usage();
             Ok(())
         }
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("kontur {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         // Bare `kontur --flag ...` → zero-config host in cwd with those flags
         // (same as `kontur host --flag ...`).
         Some(flag) if flag.starts_with("--") => host_cmd(&args[1..]).await,
@@ -137,6 +141,7 @@ fn print_usage() {
   kontur join --addr host:port --seed <hex32>
   kontur demo
   kontur help
+  kontur --version                    # print version and exit
 
   --claude      spawn a real Claude Code agent (permission-restricted via --allowedTools /
                 --disallowedTools); mutually exclusive with --demo-agent"
