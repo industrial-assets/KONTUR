@@ -141,13 +141,15 @@ Both linked, no fleet, empty prompt buffer. The console invites an instruction.
  ┌────────────────────────────────────────────────────────────────────┐
  │ _                                                                    │
  └────────────────────────────────────────────────────────────────────┘
- >  type to draft · [y] mark ready · [^↵] request dispatch
+ >  type to draft · [y] approve (signs the prompt) · [^↵] request dispatch
 ```
 
 ### 6.2 Prompt co-construction — the dispatch gate
-Either seat drafts; the other reviews live and can suggest inline. This *is* the dispatch gate — a continuous review, not a separate checkpoint (PRD §5). The prompt can't be dispatched until both mark ready.
+Either seat drafts; the other reviews live and can suggest inline. This *is* the dispatch gate — a continuous review, not a separate checkpoint (PRD §5). The prompt can't be dispatched until both approve.
 
-> **Supersession note (2026-07-20):** simplified in-console prompt entry is now implemented: `[p]` opens a compose line (empty seed); submitting replaces the prompt on both consoles and resets both ready flags — consent must re-signal against the text actually shown (same anchoring rule as the plan gate). The co-editing sketch below (dual-cursor inline suggestions) remains future work.
+> **Supersession note (2026-07-20):** simplified in-console prompt entry is now implemented: `[p]` opens a compose line (empty seed); submitting replaces the prompt on both consoles and resets both approvals — consent must re-signal against the text actually shown (same anchoring rule as the plan gate). The co-editing sketch below (dual-cursor inline suggestions) remains future work.
+
+> **Signed dispatch (2026-07-23):** `[g]`/`[y]` at the dispatch gate is a *signed approval*, not a bare ready flag — each operator signs `sha256(prompt)`, so an edit invalidates a prior approval cryptographically (not just visually). On both approvals a signed `dispatch` record is written to the audit chain (PRD §9); a compose abandoned before dispatch is recorded as an `abandoned` dispatch. The indicator reads **approved** rather than ready.
 
 ```
  [ PROMPT ]  drafting · host: you · operator reviewing live
@@ -156,8 +158,8 @@ Either seat drafts; the other reviews live and can suggest inline. This *is* the
  │ token store; keep the public interface stable.                      │
  │ ~ nav: add a regression test for the expiry path        [a]ccept    │
  └────────────────────────────────────────────────────────────────────┘
- DISPATCH GATE   A you □ ready    B j.reed □ ready
- >  [^↵] dispatch — needs both ready
+ DISPATCH GATE   A you □ approved    B j.reed □ approved
+ >  [^↵] dispatch — needs both to approve (signs the prompt)
 ```
 
 A reviewer's suggestion is a proposal the drafter accepts, which leaves a trace that the second seat actually engaged rather than passively watched.

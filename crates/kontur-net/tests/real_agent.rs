@@ -233,9 +233,9 @@ async fn real_agent_over_tcp() {
         })
         .await;
 
-        // Both ready → PlanReview.
-        client_a.ready().await.unwrap();
-        client_b.ready().await.unwrap();
+        // Both approve the composed prompt → PlanReview.
+        client_a.dispatch_approve("real agent e2e prompt").await.unwrap();
+        client_b.dispatch_approve("real agent e2e prompt").await.unwrap();
 
         cur_a.await_matching("A:plan-review", |s| {
             matches!(s.phase, WirePhase::PlanReview { .. })

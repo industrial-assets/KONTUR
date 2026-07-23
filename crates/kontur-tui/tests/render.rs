@@ -198,7 +198,7 @@ fn prompt_region_renders_dispatch_gate_and_ready_key() {
         ready: [false, true],
     }));
     assert!(s.contains("DISPATCH GATE"));
-    assert!(s.contains("[y] mark ready"));
+    assert!(s.contains("[y] approve"));
     assert!(s.contains("refactor session guard"));
 }
 

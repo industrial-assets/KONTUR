@@ -151,7 +151,7 @@ pub fn help_lines(active: &ActiveRegion, host_unlinked: bool) -> Vec<String> {
         ActiveRegion::Prompt { .. } => {
             out.push("PROMPT".into());
             out.push("  p    edit the instruction".into());
-            out.push("  y    mark ready to dispatch (needs both)".into());
+            out.push("  y    approve the prompt — signs it to dispatch (needs both)".into());
         }
         ActiveRegion::Split { .. } => {
             out.push("SPLIT".into());
@@ -717,10 +717,12 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                 .map(|l| Line::from(format!(" {l}")))
                 .collect();
             lines.push(Line::from(format!(
-                " DISPATCH GATE   A ⟨{}⟩ ready   B ⟨{}⟩ ready",
+                " DISPATCH GATE   A ⟨{}⟩ approved   B ⟨{}⟩ approved",
                 a_mark, b_mark
             )));
-            lines.push(Line::from(" [p] edit prompt · [y] mark ready — needs both"));
+            lines.push(Line::from(
+                " [p] edit prompt · [y] approve — signs the prompt, needs both",
+            ));
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(Block::bordered().title("PROMPT"))
@@ -1210,8 +1212,8 @@ mod tests {
             "expected '[p] edit prompt' in rendered Prompt region; got:\n{rendered}"
         );
         assert!(
-            rendered.contains("[y] mark ready"),
-            "expected '[y] mark ready' in rendered Prompt region; got:\n{rendered}"
+            rendered.contains("[y] approve"),
+            "expected '[y] approve' in rendered Prompt region; got:\n{rendered}"
         );
         assert!(
             rendered.contains("do the thing"),

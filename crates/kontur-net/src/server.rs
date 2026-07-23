@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, watch, Mutex};
 
-use kontur_core::{HoldState, OperatorId};
+use kontur_core::{prompt_hash, CastVerdict, HoldState, OperatorId};
 use kontur_mcp::{GateHost, HostEvent};
 
 use crate::codec::{read_json, write_json};
@@ -135,6 +135,10 @@ struct Net {
     seat_b_bound: Option<OperatorId>,
     /// A BYO operator's key currently awaiting the host's approval.
     pending_join: Option<OperatorId>,
+    /// Each seat's signed dispatch approval, gathered during `DispatchReady`.
+    /// A stored approval binds to the prompt hash it signed; any prompt edit
+    /// clears both, so a stale signature can never count toward dispatch.
+    dispatch_approvals: [Option<CastVerdict>; 2],
 }
 
 struct Inner {
@@ -232,6 +236,7 @@ impl SessionServer {
             split: None,
             seat_b_bound: None,
             pending_join: None,
+            dispatch_approvals: [None, None],
         };
 
         let server = SessionServer {
@@ -859,37 +864,17 @@ async fn handle_client_msg(
         }
         ClientMsg::Ready => {
             let mut net = server.inner.net.lock().await;
+            // The dispatch gate is signed (DispatchApprove), not a bare ready
+            // flag — a plain Ready must never advance it. Ignore Ready while
+            // the prompt is being composed so nothing dispatches unsigned.
+            if matches!(net.phase, Phase::DispatchReady) {
+                return;
+            }
             net.seats[seat_idx].ready = true;
 
             let both_ready = net.seats[0].ready && net.seats[1].ready;
             if both_ready {
                 match net.phase.clone() {
-                    Phase::DispatchReady => {
-                        // A blank instruction cannot be dispatched. Same
-                        // anchoring rule as the empty-plan refusal: consent
-                        // must be re-signalled once a prompt actually exists.
-                        if net.prompt.trim().is_empty() {
-                            net.seats[0].ready = false;
-                            net.seats[1].ready = false;
-                            push_log(&mut net, "prompt is empty — compose with [p]");
-                            drop(net);
-                            server.refresh_locked().await;
-                            return;
-                        }
-                        net.phase = Phase::PlanReview;
-                        net.seats[0].ready = false;
-                        net.seats[1].ready = false;
-                        push_log(&mut net, "dispatch confirmed · plan review");
-                        // Authoritative re-push: the prompt may have arrived
-                        // only as live drafts (never committed via SetPrompt),
-                        // so hand the gate host exactly the text both seats
-                        // consented to — same sync-point pattern as the plan.
-                        let prompt = net.prompt.clone();
-                        drop(net);
-                        server.inner.host.set_prompt(prompt).await;
-                        server.refresh_locked().await;
-                        return;
-                    }
                     Phase::Split => {
                         // Both seats approved the split. Hand the approved
                         // streams back to the agent and return to plan review;
@@ -1059,6 +1044,85 @@ async fn handle_client_msg(
                 }
             }
         }
+        ClientMsg::DispatchApprove { verdict } => {
+            // Bind the approval to the connection's authenticated identity, same
+            // as a gate cast: a seat may only approve as itself (load-bearing
+            // for BYO seat B, whose bound key is the authenticated `operator`).
+            if verdict.operator != operator {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "approval identity does not match your seat".into(),
+                    })
+                    .await;
+                return;
+            }
+            let mut net = server.inner.net.lock().await;
+            if !matches!(net.phase, Phase::DispatchReady) {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "not at the dispatch gate".into(),
+                    })
+                    .await;
+                return;
+            }
+            if net.prompt.trim().is_empty() {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "prompt is empty — compose with [p]".into(),
+                    })
+                    .await;
+                return;
+            }
+            // The approval must sign the exact current prompt bytes. The
+            // signature is verified against the *current* prompt hash, so an
+            // approval over any other text is refused; and because a prompt edit
+            // clears both stored approvals, every stored approval is guaranteed
+            // to be over the current prompt — the anchoring rule, crypto-enforced.
+            let expected = prompt_hash(&net.prompt);
+            if !verdict.verify_signature(&kontur_core::dispatch_gate_id(), expected) {
+                let _ = conn_tx
+                    .send(ServerMsg::Rejected {
+                        reason: "approval does not match the current prompt — re-approve".into(),
+                    })
+                    .await;
+                return;
+            }
+            net.dispatch_approvals[seat_idx] = Some(verdict);
+            // Reflect approval as the seat's ready indicator (display only).
+            net.seats[seat_idx].ready = true;
+            let label = net.seats[seat_idx].label.clone();
+            push_log(&mut net, &format!("{label} approved the prompt"));
+
+            // Both seats approved? (Both stored approvals are over the current
+            // prompt — an edit would have cleared them.)
+            if !net.dispatch_approvals.iter().all(Option::is_some) {
+                drop(net);
+                server.refresh_locked().await;
+                return;
+            }
+            let a = net.dispatch_approvals[0].clone().expect("both present");
+            let b = net.dispatch_approvals[1].clone().expect("both present");
+            let prompt = net.prompt.clone();
+            net.dispatch_approvals = [None, None];
+            net.phase = Phase::PlanReview;
+            net.seats[0].ready = false;
+            net.seats[1].ready = false;
+            push_log(&mut net, "dispatch confirmed · plan review");
+            drop(net);
+            // Record the signed dispatch into the audit chain before the agent
+            // runs, then hand the gate host the exact consented text.
+            if let Err(e) = server
+                .inner
+                .host
+                .record_dispatch(prompt.clone(), [a, b])
+                .await
+            {
+                let mut net = server.inner.net.lock().await;
+                push_log(&mut net, &format!("dispatch record error: {e}"));
+            }
+            server.inner.host.set_prompt(prompt).await;
+            server.refresh_locked().await;
+        }
         ClientMsg::Abandon => {
             let label = {
                 let net = server.inner.net.lock().await;
@@ -1066,19 +1130,39 @@ async fn handle_client_msg(
             };
 
             // Guard: if already Closed, ignore (race with finalize or double-abandon).
-            {
+            // While here, capture whether we are killing a compose that never
+            // dispatched, plus the draft prompt and any signed approvals, so the
+            // abandoned dispatch can be recorded as audit evidence.
+            let abandoned_dispatch = {
                 let mut net = server.inner.net.lock().await;
                 if matches!(net.phase, Phase::Closed { .. }) {
                     return;
                 }
                 // Claim finalizing regardless — abandon wins races with finalize.
                 net.finalizing = true;
-            }
+                if matches!(net.phase, Phase::DispatchReady) {
+                    let approvals: Vec<CastVerdict> =
+                        net.dispatch_approvals.iter().flatten().cloned().collect();
+                    Some((net.prompt.clone(), approvals))
+                } else {
+                    None
+                }
+            };
 
             // Discard all pending tasks via GateHost.
             if let Err(e) = server.inner.host.abandon_session().await {
                 let mut net = server.inner.net.lock().await;
                 push_log(&mut net, &format!("abandon error: {e}"));
+            }
+
+            // A compose killed before dispatch is still evidence of what was
+            // being asked and who had approved — record it before persisting.
+            if let Some((prompt, approvals)) = abandoned_dispatch {
+                server
+                    .inner
+                    .host
+                    .record_dispatch_abandoned(prompt, approvals)
+                    .await;
             }
 
             let gates = server.inner.host.audit_len().await;
@@ -1414,10 +1498,12 @@ async fn handle_client_msg(
             }
             let label = net.seats[seat_idx].label.clone();
             net.prompt = prompt.clone();
-            // Anchoring rule: any edit resets both ready flags so both seats
-            // must re-consent against the text they actually see. This prevents
-            // a seat from marking ready against one prompt and having the other
-            // seat silently dispatch a different one.
+            // Anchoring rule: any edit resets both seats' consent so both must
+            // re-approve against the text they actually see. This prevents a
+            // seat from approving one prompt and having the other seat silently
+            // dispatch a different one. Clearing the signed approvals makes the
+            // stale signatures uncountable, not just visually reset.
+            net.dispatch_approvals = [None, None];
             net.seats[0].ready = false;
             net.seats[1].ready = false;
             push_log(&mut net, &format!("{label} edited the prompt"));
@@ -1437,10 +1523,12 @@ async fn handle_client_msg(
                 return;
             }
             // Live sync: the other seat sees each keystroke. Anchoring rule
-            // still applies — any change resets both ready flags — but a
-            // draft is not a logged event (the SetPrompt commit is). The
-            // gate host receives the authoritative text at dispatch.
+            // still applies — any change clears both seats' consent (ready flag
+            // and any signed approval) — but a draft is not a logged event (the
+            // SetPrompt commit is). The gate host receives the authoritative
+            // text at dispatch.
             net.prompt = prompt;
+            net.dispatch_approvals = [None, None];
             net.seats[0].ready = false;
             net.seats[1].ready = false;
             drop(net);
@@ -1842,6 +1930,23 @@ mod tests {
         )
     }
 
+    /// Build a seat's signed dispatch approval over the exact session prompt.
+    /// A bare `Ready` no longer advances the dispatch gate; each seat casts a
+    /// `Go` signed over `dispatch_gate_id()` + `prompt_hash(prompt)`.
+    fn dispatch_approve(seed: u8, prompt: &str) -> ClientMsg {
+        let signer = Ed25519Signer::from_seed([seed; 32]);
+        let verdict = kontur_core::CastVerdict::create(
+            &signer,
+            &TestClock(1000 + seed as i64),
+            &kontur_core::dispatch_gate_id(),
+            kontur_core::prompt_hash(prompt),
+            Verdict::Go,
+            ReviewDepth::FullDiff,
+            None,
+        );
+        ClientMsg::DispatchApprove { verdict }
+    }
+
     fn cast_nogo(seed: u8, gate_id: &GateId, dh: Hash, steer: &str) -> kontur_core::CastVerdict {
         let signer = Ed25519Signer::from_seed([seed; 32]);
         kontur_core::CastVerdict::create(
@@ -2230,8 +2335,12 @@ mod tests {
         )
         .await
         .expect("DispatchReady");
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "byo"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(9, "byo"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -2473,8 +2582,12 @@ mod tests {
         .expect("timed out waiting for DispatchReady");
 
         // Both ready → PlanReview
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -2644,8 +2757,12 @@ mod tests {
         .await
         .expect("timed out waiting for DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -2737,7 +2854,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Wait for Closed with gates == 2
+        // Wait for Closed. The audit chain holds three records: the signed
+        // dispatch, the no-go on the first gate, and the go on the rework gate.
         let final_state = tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -2749,7 +2867,7 @@ mod tests {
 
         match &final_state.phase {
             WirePhase::Closed { gates, .. } => {
-                assert_eq!(*gates, 2, "should have 2 audit records");
+                assert_eq!(*gates, 3, "dispatch + 2 gate records");
             }
             _ => panic!("expected Closed phase"),
         }
@@ -2803,8 +2921,12 @@ mod tests {
         )
         .await
         .expect("DispatchReady");
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -3025,8 +3147,12 @@ mod tests {
         .await
         .expect("timed out waiting for DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -3223,8 +3349,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -3354,8 +3484,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -3498,8 +3632,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -3752,8 +3890,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -3903,8 +4045,10 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        // A marks ready.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
+        // A approves the (non-empty) prompt.
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -3999,9 +4143,13 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        // Both ready → PlanReview.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        // Both approve → PlanReview.
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -4580,8 +4728,12 @@ mod tests {
         )
         .await
         .expect("DispatchReady");
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -4676,8 +4828,12 @@ mod tests {
         )
         .await
         .expect("DispatchReady");
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -4842,8 +4998,28 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        // B marks ready; A then types — the draft must reset B's ready flag.
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        // Seed a non-empty prompt via an (unlogged) draft, then B approves it
+        // so a ready flag is set; A then types — the draft must reset it.
+        write_json(
+            &mut ca_write,
+            &ClientMsg::PromptDraft {
+                prompt: "seed".into(),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(
+                &mut state_rx,
+                |s| matches!(&s.phase, WirePhase::DispatchReady { prompt, .. } if prompt == "seed"),
+            ),
+        )
+        .await
+        .expect("seed draft synced");
+        write_json(&mut cb_write, &dispatch_approve(2, "seed"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| s.seats.iter().any(|seat| seat.ready)),
@@ -4876,8 +5052,14 @@ mod tests {
             synced.seats.iter().all(|seat| !seat.ready),
             "draft must reset both ready flags"
         );
+        // Drafts themselves are never logged — no draft keystroke text ("seed",
+        // "f", "fi", "fix") appears in the log. (An approval legitimately logs
+        // "approved the prompt"; a draft must not add any line of its own.)
         assert!(
-            !synced.log.iter().any(|l| l.contains("prompt")),
+            !synced
+                .log
+                .iter()
+                .any(|l| l.contains("seed") || l.contains("edited the prompt")),
             "drafts must not be logged; log: {:?}",
             synced.log
         );
@@ -4891,8 +5073,12 @@ mod tests {
         )
         .await
         .unwrap();
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -4973,30 +5159,29 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        // Both seats mark ready against the blank prompt.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        // Both seats approve against the blank prompt — the empty prompt makes
+        // each approval refused (no ready flag set), so nothing dispatches.
+        write_json(&mut ca_write, &dispatch_approve(1, ""))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, ""))
+            .await
+            .unwrap();
 
-        // Refusal is observable: readies reset and the reason is logged,
-        // while the phase stays DispatchReady.
-        let refused = tokio::time::timeout(
-            Duration::from_secs(5),
-            wait_for_state(&mut state_rx, |s| {
-                s.log.iter().any(|l| l.contains("prompt is empty"))
-            }),
-        )
-        .await
-        .expect("empty-prompt refusal logged");
+        // Refusal is observable: the phase stays DispatchReady and no ready flag
+        // is set (a blank-prompt approval is rejected before it can count).
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let refused = state_rx.borrow().clone();
         assert!(
             matches!(refused.phase, WirePhase::DispatchReady { .. }),
             "phase must stay DispatchReady on blank prompt"
         );
         assert!(
             refused.seats.iter().all(|seat| !seat.ready),
-            "both ready flags must reset on refusal"
+            "no ready flag may be set on a blank-prompt refusal"
         );
 
-        // Compose a prompt, re-signal consent → dispatch proceeds.
+        // Compose a prompt, re-approve against it → dispatch proceeds.
         write_json(
             &mut ca_write,
             &ClientMsg::SetPrompt {
@@ -5005,8 +5190,12 @@ mod tests {
         )
         .await
         .unwrap();
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -5016,6 +5205,92 @@ mod tests {
         )
         .await
         .expect("dispatch proceeds once a prompt exists");
+    }
+
+    /// Killing a compose before dispatch records an *abandoned* dispatch: the
+    /// draft prompt (and any gathered approval) is signed audit evidence of what
+    /// was being asked, even though nothing reached the agent or merged.
+    #[tokio::test]
+    async fn abandon_during_compose_records_abandoned_dispatch() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+
+        let (server, _ws) = make_server(op1, op2, vec!["t1".into()]);
+        let mut state_rx = server.state_rx();
+
+        let (client_a, server_a) = tokio::io::duplex(65536);
+        let (client_b, server_b) = tokio::io::duplex(65536);
+        server.attach(server_a).await;
+        server.attach(server_b).await;
+
+        let (ca_read, mut ca_write) = tokio::io::split(client_a);
+        let (cb_read, mut cb_write) = tokio::io::split(client_b);
+        drain_client(BufReader::new(ca_read)).await;
+        drain_client(BufReader::new(cb_read)).await;
+
+        write_json(
+            &mut ca_write,
+            &ClientMsg::Hello {
+                seat: "A".into(),
+                operator: op1,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                client_version: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        write_json(
+            &mut cb_write,
+            &ClientMsg::Hello {
+                seat: "B".into(),
+                operator: op2,
+                protocol: crate::protocol::PROTOCOL_VERSION,
+                client_version: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(s.phase, WirePhase::DispatchReady { .. })
+            }),
+        )
+        .await
+        .expect("DispatchReady");
+
+        // One seat approves, then the session is killed before the second key.
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut ca_write, &ClientMsg::Abandon)
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_state(&mut state_rx, |s| {
+                matches!(
+                    s.phase,
+                    WirePhase::Closed {
+                        abandoned: true,
+                        ..
+                    }
+                )
+            }),
+        )
+        .await
+        .expect("session closes on abandon");
+
+        // The abandoned dispatch is in the chain (no gate ever resolved, so this
+        // record can only be the dispatch), and the chain verifies.
+        assert_eq!(
+            server.inner.host.audit_len().await,
+            1,
+            "abandoned compose must leave one dispatch record"
+        );
+        assert!(server.inner.host.verify_audit().await.is_ok());
     }
 
     // -----------------------------------------------------------------------
@@ -5092,8 +5367,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -5374,8 +5653,12 @@ mod tests {
         .expect("DispatchReady");
 
         // Both ready → PlanReview.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -5487,8 +5770,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -5590,8 +5877,12 @@ mod tests {
         .expect("DispatchReady");
 
         // Both ready → PlanReview.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
         tokio::time::timeout(
             Duration::from_secs(5),
             wait_for_state(&mut state_rx, |s| {
@@ -5730,8 +6021,12 @@ mod tests {
         .expect("DispatchReady");
 
         // Both ready → PlanReview.
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -5849,8 +6144,12 @@ mod tests {
         .expect("DispatchReady");
 
         // Both ready → PlanReview (no propose_plan call — using cfg.plan fallback).
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -5943,8 +6242,12 @@ mod tests {
         .await
         .expect("DispatchReady");
 
-        write_json(&mut ca_write, &ClientMsg::Ready).await.unwrap();
-        write_json(&mut cb_write, &ClientMsg::Ready).await.unwrap();
+        write_json(&mut ca_write, &dispatch_approve(1, "fix the thing"))
+            .await
+            .unwrap();
+        write_json(&mut cb_write, &dispatch_approve(2, "fix the thing"))
+            .await
+            .unwrap();
 
         tokio::time::timeout(
             Duration::from_secs(5),

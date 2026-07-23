@@ -95,28 +95,45 @@ fn audit_cmd(args: &[String]) -> std::io::Result<()> {
         std::process::exit(2);
     };
     let bytes = std::fs::read(path)?;
-    let records: Vec<kontur_core::GateRecord> = serde_json::from_slice(&bytes).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("not an audit file: {e}"),
-        )
-    })?;
+    // Current files are a tagged `Vec<AuditEntry>` (merge + dispatch entries).
+    // Files written before the dispatch-gate record was added are a bare
+    // `Vec<GateRecord>` (untagged `{core, this_hash}` objects) — fall back to
+    // reading those and wrapping each as a merge entry, so audit evidence
+    // already committed to git history still verifies.
+    let records: Vec<kontur_core::AuditEntry> = serde_json::from_slice(&bytes)
+        .or_else(|_| {
+            serde_json::from_slice::<Vec<kontur_core::GateRecord>>(&bytes)
+                .map(|v| v.into_iter().map(kontur_core::AuditEntry::Merge).collect())
+        })
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("not an audit file: {e}"),
+            )
+        })?;
     match kontur_core::verify_chain(&records) {
         Ok(()) => {
             let head = records
                 .last()
                 .map(|r| {
-                    r.this_hash
+                    r.this_hash()
                         .0
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()
                 })
                 .unwrap_or_else(|| "genesis".into());
+            let dispatched = records
+                .iter()
+                .filter(|e| matches!(e, kontur_core::AuditEntry::Dispatch(_)))
+                .count();
+            let gates = records.len() - dispatched;
             println!(
-                "audit chain OK — {} gate{} · head sha256:{head}",
-                records.len(),
-                if records.len() == 1 { "" } else { "s" },
+                "audit chain OK — {} gate{} · {} dispatch{} · head sha256:{head}",
+                gates,
+                if gates == 1 { "" } else { "s" },
+                dispatched,
+                if dispatched == 1 { "" } else { "es" },
             );
             Ok(())
         }

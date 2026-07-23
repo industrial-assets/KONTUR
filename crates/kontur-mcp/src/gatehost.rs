@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use kontur_core::{
-    reviewed_by as core_reviewed_by, verify_chain, AuditChain, Authorship, CastVerdict, ChainBreak,
-    DualHold, GateId, GateRecord, Hash, HoldState, MakerSet, OperatorId, Provenance, Remedy,
+    dispatch_gate_id, prompt_hash, reviewed_by as core_reviewed_by, verify_chain, AuditChain,
+    AuditEntry, Authorship, CastVerdict, ChainBreak, CheckerEntry, DispatchRecord, DualHold,
+    GateId, GatePolicy, GateRecord, Hash, HoldState, MakerSet, OperatorId, Provenance, Remedy,
     TaskId, VerdictView,
 };
 use tokio::sync::{broadcast, watch, Mutex};
@@ -203,6 +204,25 @@ pub struct GateHost {
     state: Arc<Mutex<SessionState>>,
     workspace: Arc<dyn Workspace>,
     events: broadcast::Sender<HostEvent>,
+}
+
+/// A hold for the dispatch gate: keyed on the prompt hash (the content each
+/// operator signs) under the fixed dispatch gate id. Non-blind — the prompt is
+/// co-composed in the open, so there is nothing to seal — and independence stays
+/// strict with an empty maker set, so two *distinct* operator signatures are
+/// required and neither is excluded.
+fn dispatch_hold(prompt: &str) -> DualHold {
+    DualHold::new(
+        dispatch_gate_id(),
+        TaskId("dispatch".into()),
+        prompt_hash(prompt),
+        GatePolicy {
+            blind: false,
+            ..GatePolicy::default()
+        },
+        MakerSet::new(),
+        Authorship::HandEdited,
+    )
 }
 
 impl GateHost {
@@ -406,6 +426,86 @@ impl GateHost {
         self.state.lock().await.ctx.prompt = prompt;
     }
 
+    /// Operator face: record the dispatch gate resolving with both keys. The two
+    /// `approvals` are signed `go` verdicts over `prompt_hash(prompt)` and the
+    /// dispatch gate id (the server validated the binding before calling). They
+    /// are replayed into a fresh, non-blind hold so independence and signatures
+    /// are enforced by the same vetted path as any gate; on `Satisfied` a signed
+    /// `DispatchRecord` is chained. Returns the new chain head.
+    ///
+    /// This precedes any task and merges nothing — it is pure audit evidence of
+    /// what was dispatched and who approved it (invariant #6 for the dispatch gate).
+    pub async fn record_dispatch(
+        &self,
+        prompt: String,
+        approvals: [CastVerdict; 2],
+    ) -> Result<Hash, GateHostError> {
+        let mut st = self.state.lock().await;
+        if st.abandoned {
+            return Err(GateHostError::SessionAbandoned);
+        }
+        // Roster check at the boundary, mirroring submit_verdict: only registered
+        // operators may back a dispatch.
+        for cv in &approvals {
+            if !st.ctx.operators.contains(&cv.operator) {
+                return Err(GateHostError::Cast(kontur_core::CastRejected::Ineligible));
+            }
+        }
+        let prompt_author = st.ctx.prompt_author;
+        let mut hold = dispatch_hold(&prompt);
+        for cv in approvals {
+            let ev = hold.version();
+            hold.cast(ev, cv)?;
+        }
+        if hold.state() != HoldState::Satisfied {
+            // Two distinct signed go's did not satisfy — refuse rather than
+            // record a half-formed dispatch as complete.
+            return Err(GateHostError::Cast(kontur_core::CastRejected::Ineligible));
+        }
+        let prev = st.chain.head();
+        let record = DispatchRecord::build_dispatched(prev, prompt, prompt_author, &hold)
+            .expect("a satisfied hold always builds a dispatched record");
+        let head = record.this_hash;
+        st.chain
+            .append(AuditEntry::Dispatch(record))
+            .expect("chain head matches prev by construction");
+        Ok(head)
+    }
+
+    /// Operator face: record a compose that was killed/closed before dispatch.
+    /// Captures the current draft `prompt` and whatever signed approvals had been
+    /// gathered (0..=2). No-op (returns `None`) when the prompt is empty *and* no
+    /// approvals exist — nothing worth recording. Nothing merged.
+    pub async fn record_dispatch_abandoned(
+        &self,
+        prompt: String,
+        approvals: Vec<CastVerdict>,
+    ) -> Option<Hash> {
+        if prompt.trim().is_empty() && approvals.is_empty() {
+            return None;
+        }
+        let mut st = self.state.lock().await;
+        let prompt_author = st.ctx.prompt_author;
+        let approvers: Vec<CheckerEntry> = approvals
+            .into_iter()
+            .map(|cv| CheckerEntry {
+                operator: cv.operator,
+                cast_at: cv.cast_at,
+                verdict: cv.verdict,
+                depth: cv.depth,
+                comment: cv.comment,
+                signature: cv.signature,
+            })
+            .collect();
+        let prev = st.chain.head();
+        let record = DispatchRecord::build_abandoned(prev, prompt, prompt_author, approvers);
+        let head = record.this_hash;
+        st.chain
+            .append(AuditEntry::Dispatch(record))
+            .expect("chain head matches prev by construction");
+        Some(head)
+    }
+
     /// Agent face: record a worktree write on a task (not gated).
     pub async fn record_write(
         &self,
@@ -524,7 +624,7 @@ impl GateHost {
                 };
                 self.workspace.accept_task(&task_id)?;
                 st.chain
-                    .append(record)
+                    .append(AuditEntry::Merge(record))
                     .expect("chain head matches prev by construction");
                 None
             }
@@ -537,7 +637,7 @@ impl GateHost {
                     (e.hold.task_id().clone(), e.hold.blocking_remedy(), rec)
                 };
                 st.chain
-                    .append(record)
+                    .append(AuditEntry::Merge(record))
                     .expect("chain head matches prev by construction");
                 self.workspace.discard_task(&task_id)?;
                 remedy
@@ -582,7 +682,7 @@ impl GateHost {
         st.chain
             .records()
             .iter()
-            .find(|r| &r.core.gate_id == gate_id)
+            .find(|e| e.gate_id() == gate_id)
             .map(core_reviewed_by)
     }
 
@@ -673,7 +773,7 @@ impl GateHost {
             .chain
             .records()
             .iter()
-            .find(|r| &r.core.gate_id == effective_id)
+            .find(|e| e.gate_id() == effective_id)
             .map(core_reviewed_by)
             .unwrap_or_default();
         Some(GateFinal {
@@ -1069,12 +1169,15 @@ mod tests {
             !bytes.contains(&b'\n'),
             "persisted audit json must be compact"
         );
-        let records: Vec<kontur_core::GateRecord> = serde_json::from_slice(&bytes).unwrap();
+        let records: Vec<kontur_core::AuditEntry> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(records.len(), 1);
         kontur_core::verify_chain(&records).expect("reloaded chain must verify");
         // Tamper-evidence survives the round-trip: flip a byte, break the chain.
         let mut tampered = records.clone();
-        tampered[0].core.provenance.loc += 1;
+        let kontur_core::AuditEntry::Merge(r) = &mut tampered[0] else {
+            panic!("expected a merge entry")
+        };
+        r.core.provenance.loc += 1;
         assert!(kontur_core::verify_chain(&tampered).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1174,6 +1277,93 @@ mod tests {
         let prov = build_provenance(ctx, &task, dh, &frozen, 100);
         let (gid, _rx) = host.open_gate("agent-01", task, prov).await;
         (gid, dh)
+    }
+
+    fn dispatch_go(seed: u8, prompt: &str) -> CastVerdict {
+        let signer = Ed25519Signer::from_seed([seed; 32]);
+        CastVerdict::create(
+            &signer,
+            &FixedClock(1000 + seed as i64),
+            &dispatch_gate_id(),
+            prompt_hash(prompt),
+            Verdict::Go,
+            ReviewDepth::FullDiff,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn record_dispatch_appends_signed_dispatched_record() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        let prompt = "wire the audit trailer";
+        host.record_dispatch(
+            prompt.into(),
+            [dispatch_go(1, prompt), dispatch_go(2, prompt)],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(host.audit_len().await, 1);
+        assert!(host.verify_audit().await.is_ok());
+        // The dispatch record carries the prompt and both signed approvers.
+        let st = host.state.lock().await;
+        let AuditEntry::Dispatch(d) = &st.chain.records()[0] else {
+            panic!("expected a dispatch entry")
+        };
+        assert_eq!(d.core.prompt, prompt);
+        assert_eq!(d.core.approvers.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_dispatch_rejects_unregistered_operator() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        // Roster is {op1, op2}; a third signer (seed 7) is not registered.
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+        let prompt = "do it";
+        let err = host
+            .record_dispatch(
+                prompt.into(),
+                [dispatch_go(1, prompt), dispatch_go(7, prompt)],
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GateHostError::Cast(_)));
+        assert_eq!(host.audit_len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn record_dispatch_abandoned_records_and_guards_noise() {
+        let op1 = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let op2 = Ed25519Signer::from_seed([2; 32]).operator_id();
+        let ws = Arc::new(InMemoryWorkspace::new());
+        let host = GateHost::new(ctx(vec![op1, op2]), ws);
+
+        // Empty draft + no approvals → nothing recorded.
+        assert!(host
+            .record_dispatch_abandoned(String::new(), vec![])
+            .await
+            .is_none());
+        assert_eq!(host.audit_len().await, 0);
+
+        // A non-empty draft with one gathered approval → abandoned record.
+        let prompt = "half-typed instruction";
+        host.record_dispatch_abandoned(prompt.into(), vec![dispatch_go(1, prompt)])
+            .await
+            .expect("non-empty draft is recorded");
+        assert_eq!(host.audit_len().await, 1);
+        assert!(host.verify_audit().await.is_ok());
+        let st = host.state.lock().await;
+        let AuditEntry::Dispatch(d) = &st.chain.records()[0] else {
+            panic!("expected a dispatch entry")
+        };
+        assert_eq!(d.core.outcome, kontur_core::DispatchOutcome::Abandoned);
+        assert_eq!(d.core.approvers.len(), 1);
     }
 
     #[tokio::test]
@@ -2108,12 +2298,15 @@ mod tests {
 
         // The satisfied gate's audit record must carry the updated prompt.
         let st = host.state.lock().await;
-        let record = st
+        let entry = st
             .chain
             .records()
             .iter()
-            .find(|r| r.core.gate_id == gid)
+            .find(|e| e.gate_id() == &gid)
             .unwrap();
+        let AuditEntry::Merge(record) = entry else {
+            panic!("expected a merge entry")
+        };
         assert_eq!(
             record.core.provenance.prompt, "updated in-console",
             "audit record must carry the in-console-edited prompt"

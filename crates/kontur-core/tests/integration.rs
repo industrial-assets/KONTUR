@@ -1,7 +1,7 @@
 use kontur_core::{
-    reviewed_by, verify_chain, AuditChain, Authorship, CastVerdict, DualHold, Ed25519Signer,
-    FixedClock, GateId, GatePolicy, GateRecord, Hash, HoldState, Independence, MakerSet, Outcome,
-    Provenance, Remedy, ReviewDepth, Signer, TaskId, Verdict, GENESIS,
+    reviewed_by, verify_chain, AuditChain, AuditEntry, Authorship, CastVerdict, DualHold,
+    Ed25519Signer, FixedClock, GateId, GatePolicy, GateRecord, Hash, HoldState, Independence,
+    MakerSet, Outcome, Provenance, Remedy, ReviewDepth, Signer, TaskId, Verdict, GENESIS,
 };
 
 fn provenance(diff: Hash, author: kontur_core::OperatorId) -> Provenance {
@@ -66,7 +66,7 @@ fn clean_task_produces_a_verified_record() {
     let author = Ed25519Signer::from_seed([1; 32]).operator_id();
     let mut chain = AuditChain::new();
     let rec = GateRecord::build(chain.head(), provenance(diff, author), &h).unwrap();
-    chain.append(rec).unwrap();
+    chain.append(AuditEntry::Merge(rec)).unwrap();
 
     assert!(verify_chain(chain.records()).is_ok());
     assert_eq!(rec_outcome(&chain), Outcome::Unanimous);
@@ -74,7 +74,10 @@ fn clean_task_produces_a_verified_record() {
 }
 
 fn rec_outcome(chain: &AuditChain) -> Outcome {
-    chain.records()[0].core.outcome
+    match &chain.records()[0] {
+        AuditEntry::Merge(r) => r.core.outcome,
+        AuditEntry::Dispatch(_) => panic!("expected a merge entry"),
+    }
 }
 
 // UX §7: "Caught in review" — no-go with a steer, then a clean second pass on a

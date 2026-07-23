@@ -1,18 +1,77 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::audit::record::GateRecord;
+use crate::audit::record::{prompt_hash, CheckerEntry, DispatchRecord, GateRecord};
 use crate::canonical::canonical_bytes;
-use crate::ids::{Hash, OperatorId};
+use crate::ids::{GateId, Hash, OperatorId};
 use crate::sign::verify;
 use crate::verdict::{SignedContent, Verdict};
 
 /// The genesis anchor: the `prev_hash` of the first real record.
 pub const GENESIS: Hash = Hash([0u8; 32]);
 
-/// An append-only chain of gate records.
+/// One entry in the audit chain. Both kinds share the `prev_hash`/`this_hash`
+/// chaining discipline; a merge entry signs over its diff, a dispatch entry
+/// over its prompt. Internally tagged so the on-disk JSON is self-describing.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuditEntry {
+    Merge(GateRecord),
+    Dispatch(DispatchRecord),
+}
+
+impl AuditEntry {
+    pub fn prev_hash(&self) -> Hash {
+        match self {
+            AuditEntry::Merge(r) => r.core.prev_hash,
+            AuditEntry::Dispatch(d) => d.core.prev_hash,
+        }
+    }
+
+    pub fn this_hash(&self) -> Hash {
+        match self {
+            AuditEntry::Merge(r) => r.this_hash,
+            AuditEntry::Dispatch(d) => d.this_hash,
+        }
+    }
+
+    pub fn recompute_hash(&self) -> Hash {
+        match self {
+            AuditEntry::Merge(r) => r.recompute_hash(),
+            AuditEntry::Dispatch(d) => d.recompute_hash(),
+        }
+    }
+
+    pub fn gate_id(&self) -> &GateId {
+        match self {
+            AuditEntry::Merge(r) => &r.core.gate_id,
+            AuditEntry::Dispatch(d) => &d.core.gate_id,
+        }
+    }
+
+    /// The `(gate_id, diff_hash, checker entries)` a verifier needs to check
+    /// this entry's signatures. For a dispatch the "diff_hash" is the prompt
+    /// hash — the content each approver actually signed.
+    fn signed_over(&self) -> (&GateId, Hash, &[CheckerEntry]) {
+        match self {
+            AuditEntry::Merge(r) => (
+                &r.core.gate_id,
+                r.core.provenance.diff_hash,
+                &r.core.checkers,
+            ),
+            AuditEntry::Dispatch(d) => (
+                &d.core.gate_id,
+                prompt_hash(&d.core.prompt),
+                &d.core.approvers,
+            ),
+        }
+    }
+}
+
+/// An append-only chain of audit entries.
 #[derive(Clone, Debug, Default)]
 pub struct AuditChain {
-    records: Vec<GateRecord>,
+    records: Vec<AuditEntry>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Error)]
@@ -38,80 +97,78 @@ impl AuditChain {
         }
     }
 
-    /// The hash to chain the next record onto: the last record's `this_hash`,
+    /// The hash to chain the next record onto: the last entry's `this_hash`,
     /// or `GENESIS` when empty.
     pub fn head(&self) -> Hash {
-        self.records.last().map(|r| r.this_hash).unwrap_or(GENESIS)
+        self.records
+            .last()
+            .map(|r| r.this_hash())
+            .unwrap_or(GENESIS)
     }
 
-    /// Append a record. Its `prev_hash` must equal the current head.
-    pub fn append(&mut self, record: GateRecord) -> Result<(), ChainError> {
-        if record.core.prev_hash != self.head() {
+    /// Append an entry. Its `prev_hash` must equal the current head.
+    pub fn append(&mut self, entry: AuditEntry) -> Result<(), ChainError> {
+        if entry.prev_hash() != self.head() {
             return Err(ChainError::WrongPrevHash);
         }
-        self.records.push(record);
+        self.records.push(entry);
         Ok(())
     }
 
-    pub fn records(&self) -> &[GateRecord] {
+    pub fn records(&self) -> &[AuditEntry] {
         &self.records
     }
 }
 
-/// Verify an entire chain: every record's hash matches its contents, every link
-/// matches the previous record, and every checker signature verifies. Any byte
-/// mutation anywhere fails this (invariant #6).
-pub fn verify_chain(records: &[GateRecord]) -> Result<(), ChainBreak> {
+/// Verify an entire chain: every entry's hash matches its contents, every link
+/// matches the previous entry, and every checker/approver signature verifies.
+/// Any byte mutation anywhere fails this (invariant #6). Merge signatures are
+/// checked against the diff hash, dispatch approvals against the prompt hash.
+/// An abandoned dispatch with zero approvers verifies on the hash chain alone.
+pub fn verify_chain(records: &[AuditEntry]) -> Result<(), ChainBreak> {
     let mut expected_prev = GENESIS;
-    for (i, rec) in records.iter().enumerate() {
-        if rec.recompute_hash() != rec.this_hash {
+    for (i, entry) in records.iter().enumerate() {
+        if entry.recompute_hash() != entry.this_hash() {
             return Err(ChainBreak::HashMismatch(i));
         }
-        if rec.core.prev_hash != expected_prev {
+        if entry.prev_hash() != expected_prev {
             return Err(ChainBreak::BrokenLink(i));
         }
-        for checker in &rec.core.checkers {
-            let content = SignedContent {
-                gate_id: rec.core.gate_id.clone(),
-                diff_hash: rec.core.provenance.diff_hash,
-                operator: checker.operator,
-                verdict: checker.verdict.clone(),
-                depth: checker.depth,
-                cast_at: checker.cast_at,
-            };
-            if !verify(
-                checker.operator,
-                &canonical_bytes(&content),
-                &checker.signature,
-            ) {
+        let (gate_id, diff_hash, checkers) = entry.signed_over();
+        for checker in checkers {
+            if !verify_entry_signature(gate_id, diff_hash, checker) {
                 return Err(ChainBreak::BadCheckerSignature(i));
             }
         }
-        expected_prev = rec.this_hash;
+        expected_prev = entry.this_hash();
     }
     Ok(())
 }
 
-/// The operators whose verified `go` signatures back this record — the source
-/// of the `Reviewed-by:` trailers (FR-21).
-pub fn reviewed_by(record: &GateRecord) -> Vec<OperatorId> {
-    record
-        .core
-        .checkers
+/// Verify one checker/approver signature against the content it bound to.
+fn verify_entry_signature(gate_id: &GateId, diff_hash: Hash, checker: &CheckerEntry) -> bool {
+    let content = SignedContent {
+        gate_id: gate_id.clone(),
+        diff_hash,
+        operator: checker.operator,
+        verdict: checker.verdict.clone(),
+        depth: checker.depth,
+        cast_at: checker.cast_at,
+    };
+    verify(
+        checker.operator,
+        &canonical_bytes(&content),
+        &checker.signature,
+    )
+}
+
+/// The operators whose verified `go` signatures back this entry — the source
+/// of the `Reviewed-by:` trailers (FR-21). Works for either entry kind.
+pub fn reviewed_by(entry: &AuditEntry) -> Vec<OperatorId> {
+    let (gate_id, diff_hash, checkers) = entry.signed_over();
+    checkers
         .iter()
-        .filter(|c| {
-            c.verdict == Verdict::Go && {
-                let content = SignedContent {
-                    gate_id: record.core.gate_id.clone(),
-                    diff_hash: record.core.provenance.diff_hash,
-                    operator: c.operator,
-                    verdict: c.verdict.clone(),
-                    depth: c.depth,
-                    cast_at: c.cast_at,
-                };
-                verify(c.operator, &canonical_bytes(&content), &c.signature)
-            }
-        })
+        .filter(|c| c.verdict == Verdict::Go && verify_entry_signature(gate_id, diff_hash, c))
         .map(|c| c.operator)
         .collect()
 }
@@ -128,7 +185,11 @@ mod tests {
     use crate::verdict::{CastVerdict, Remedy, Verdict};
     use crate::{GatePolicy, ReviewDepth};
 
-    fn record(prev: Hash, gate: &str) -> GateRecord {
+    fn record(prev: Hash, gate: &str) -> AuditEntry {
+        AuditEntry::Merge(merge_record(prev, gate))
+    }
+
+    fn merge_record(prev: Hash, gate: &str) -> GateRecord {
         let mut h = DualHold::new(
             GateId(gate.into()),
             TaskId("t1".into()),
@@ -191,7 +252,10 @@ mod tests {
         chain.append(record(GENESIS, "g1")).unwrap();
         let mut records = chain.records().to_vec();
         // Tamper with recorded provenance without recomputing the hash.
-        records[0].core.provenance.loc = 999;
+        let AuditEntry::Merge(r) = &mut records[0] else {
+            panic!("expected a merge entry")
+        };
+        r.core.provenance.loc = 999;
         assert_eq!(
             verify_chain(&records).unwrap_err(),
             ChainBreak::HashMismatch(0)
@@ -222,11 +286,11 @@ mod tests {
     fn verify_chain_detects_tampered_checker_signature() {
         // Flip a checker's verdict, then recompute this_hash so the hash check passes.
         // The signature no longer matches the tampered content -> BadCheckerSignature.
-        let mut r = record(GENESIS, "g1");
+        let mut r = merge_record(GENESIS, "g1");
         r.core.checkers[0].verdict = Verdict::NoGo(Remedy::Steer("forged".into()));
         r.this_hash = r.recompute_hash();
         assert_eq!(
-            verify_chain(&[r]).unwrap_err(),
+            verify_chain(&[AuditEntry::Merge(r)]).unwrap_err(),
             ChainBreak::BadCheckerSignature(0)
         );
     }
@@ -234,6 +298,101 @@ mod tests {
     #[test]
     fn verify_chain_accepts_empty() {
         assert!(verify_chain(&[]).is_ok());
+    }
+
+    // --- dispatch entries ---------------------------------------------------
+
+    use crate::audit::record::{prompt_hash, DispatchOutcome, DispatchRecord};
+    use crate::dispatch_gate_id;
+
+    fn dispatch_hold(prompt: &str) -> DualHold {
+        let mut h = DualHold::new(
+            dispatch_gate_id(),
+            TaskId("dispatch".into()),
+            prompt_hash(prompt),
+            GatePolicy {
+                blind: false,
+                ..GatePolicy::default()
+            },
+            MakerSet::new(),
+            Authorship::HandEdited,
+        );
+        for seed in [1u8, 2u8] {
+            let signer = Ed25519Signer::from_seed([seed; 32]);
+            let clock = FixedClock(1000 + seed as i64);
+            let cv = CastVerdict::create(
+                &signer,
+                &clock,
+                h.gate_id(),
+                h.diff_hash(),
+                Verdict::Go,
+                ReviewDepth::FullDiff,
+                None,
+            );
+            let ev = h.version();
+            h.cast(ev, cv).unwrap();
+        }
+        h
+    }
+
+    fn dispatch_entry(prev: Hash, prompt: &str) -> AuditEntry {
+        let h = dispatch_hold(prompt);
+        let author = Ed25519Signer::from_seed([1; 32]).operator_id();
+        AuditEntry::Dispatch(
+            DispatchRecord::build_dispatched(prev, prompt.into(), author, &h).unwrap(),
+        )
+    }
+
+    #[test]
+    fn mixed_dispatch_and_merge_chain_verifies() {
+        let mut chain = AuditChain::new();
+        chain
+            .append(dispatch_entry(GENESIS, "ship the login fix"))
+            .unwrap();
+        chain.append(record(chain.head(), "g1")).unwrap();
+        assert!(verify_chain(chain.records()).is_ok());
+        assert_eq!(chain.records().len(), 2);
+        // The dispatch entry backs two go-signers via reviewed_by too.
+        assert_eq!(reviewed_by(&chain.records()[0]).len(), 2);
+    }
+
+    #[test]
+    fn tampering_dispatch_prompt_breaks_the_hash() {
+        let mut entry = dispatch_entry(GENESIS, "original prompt");
+        let AuditEntry::Dispatch(d) = &mut entry else {
+            panic!("expected a dispatch entry")
+        };
+        d.core.prompt = "a different prompt".into(); // hash not recomputed
+        assert_eq!(
+            verify_chain(&[entry]).unwrap_err(),
+            ChainBreak::HashMismatch(0)
+        );
+    }
+
+    #[test]
+    fn tampering_dispatch_prompt_with_rehash_fails_signature() {
+        // Recompute this_hash after swapping the prompt: the hash check passes,
+        // but the approvers signed the *original* prompt, so signatures fail.
+        let mut entry = dispatch_entry(GENESIS, "original prompt");
+        let AuditEntry::Dispatch(d) = &mut entry else {
+            panic!("expected a dispatch entry")
+        };
+        d.core.prompt = "a different prompt".into();
+        d.this_hash = d.recompute_hash();
+        assert_eq!(
+            verify_chain(&[entry]).unwrap_err(),
+            ChainBreak::BadCheckerSignature(0)
+        );
+    }
+
+    #[test]
+    fn abandoned_dispatch_with_no_approvers_verifies_on_chain_alone() {
+        let author = Ed25519Signer::from_seed([1; 32]).operator_id();
+        let rec =
+            DispatchRecord::build_abandoned(GENESIS, "half-typed prompt".into(), author, vec![]);
+        assert_eq!(rec.core.outcome, DispatchOutcome::Abandoned);
+        assert!(rec.core.approvers.is_empty());
+        assert!(verify_chain(&[AuditEntry::Dispatch(rec)]).is_ok());
     }
 
     #[test]
@@ -282,10 +441,13 @@ mod tests {
             tokens: 1,
         };
         let rec = GateRecord::build(chain.head(), prov, &h).unwrap();
-        chain.append(rec).unwrap();
+        chain.append(AuditEntry::Merge(rec)).unwrap();
         assert!(verify_chain(chain.records()).is_ok());
         let mut tampered = chain.records().to_vec();
-        tampered[1].core.outcome = Outcome::Unanimous; // lie about the outcome
+        let AuditEntry::Merge(r) = &mut tampered[1] else {
+            panic!("expected a merge entry")
+        };
+        r.core.outcome = Outcome::Unanimous; // lie about the outcome
         assert!(verify_chain(&tampered).is_err());
     }
 }

@@ -14,7 +14,8 @@ pub mod sign;
 pub mod verdict;
 
 pub use audit::{
-    reviewed_by, verify_chain, AuditChain, ChainBreak, ChainError, CheckerEntry, GateRecord,
+    dispatch_gate_id, prompt_hash, reviewed_by, verify_chain, AuditChain, AuditEntry, ChainBreak,
+    ChainError, CheckerEntry, DispatchCore, DispatchOutcome, DispatchRecord, GateRecord,
     Provenance, RecordCore, RecordError, GENESIS,
 };
 pub use canonical::{canonical_bytes, sha256};

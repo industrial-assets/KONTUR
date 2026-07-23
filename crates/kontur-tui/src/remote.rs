@@ -844,7 +844,14 @@ pub async fn run_remote(
             }
 
             Some(Action::Ready) => {
-                let _ = client.ready().await;
+                // At the dispatch gate, consent is a signed approval over the
+                // exact prompt shown (not a bare ready flag) — the operator
+                // signs the bytes they approved. Elsewhere it stays a ready.
+                if matches!(state.phase, WirePhase::DispatchReady { .. }) {
+                    let _ = client.dispatch_approve(&state.prompt).await;
+                } else {
+                    let _ = client.ready().await;
+                }
             }
 
             // Plan selection navigation.

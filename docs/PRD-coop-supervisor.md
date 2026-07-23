@@ -86,7 +86,7 @@ Co-op Supervisor reintroduces the pair, one layer up. Instead of two people at o
 
 ### Prompt co-construction (dispatch gate)
 - **FR-4** Collaborative prompt editing; default driver-types / navigator-suggests, with optional simultaneous two-cursor editing (opt-in, per session). *(simplified in-console prompt entry with edit-resets-consent implemented 2026-07-20; live draft sync implemented 2026-07-21 — each keystroke streams to both seats via `PromptDraft`, resets both ready flags, and is unlogged until the commit; Esc restores the pre-edit text; simultaneous drafts are last-write-wins. **Two-cursor co-editing deferred indefinitely (21 Jul 2026): the live draft sync is sufficient; revisit only if simultaneous editing becomes a real pain point.**)*
-- **FR-5** A prompt cannot be dispatched without the dispatch gate being satisfied (both operators have seen/accepted the instruction). *(implemented 2026-07-21: the bar is both seats marking ready against a non-empty prompt; any prompt edit resets both ready marks; a blank prompt is refused at dispatch)*
+- **FR-5** A prompt cannot be dispatched without the dispatch gate being satisfied (both operators have seen/accepted the instruction). *(implemented 2026-07-21: the bar is both seats approving a non-empty prompt; any prompt edit resets both approvals; a blank prompt is refused at dispatch. **Signed & audited 2026-07-23:** `[g]` at the dispatch gate is now a signed approval — each operator signs `sha256(prompt)` (reusing the verdict signing primitive), so consent binds to the exact prompt bytes and an edit cryptographically invalidates a prior approval. On both approvals a signed, hash-chained `DispatchRecord` is written to the audit chain (§9); a compose killed before dispatch is recorded as an `Abandoned` dispatch. Nothing here merges — the prompt gate is audit evidence, not a merge.)*
 
 ### Planning
 - **FR-6** The agent returns a task list of bounded, single-concern tasks with explicit dependencies (a DAG). *(implemented: the agent proposes a task list via `propose_plan`, gated and executed in order; tasks are an ordered list today — explicit dependency DAGs are not yet modelled)*
@@ -137,7 +137,7 @@ earlier prompt-entry parallel toggle.)*
 - **FR-19** Bounded up-front planning is the primary defence against earlier approved tasks being invalidated. There is **no agent-driven backward invalidation**; an already-approved task reopens **only** when supervisors deliberately edit it mid-session, which then re-ripples forward through re-approval.
 
 ### Audit & provenance
-- **FR-20** Every gate emits a signed, immutable audit record at gate time (see §9), hash-chained to the previous record so the sequence is tamper-evident. *(implemented: signed SHA-256 hash-chained records; persisted to `.kontur/audit-<head>.json` at close and verifiable with `kontur audit`)*
+- **FR-20** Every gate emits a signed, immutable audit record at gate time (see §9), hash-chained to the previous record so the sequence is tamper-evident. *(implemented: signed SHA-256 hash-chained records; persisted to `.kontur/audit-<head>.json` at close and verifiable with `kontur audit`. **The dispatch gate now emits a record too (2026-07-23)** — the chain is a tagged sequence of `merge` and `dispatch` entries, so the guarantee "every gate emits a signed record" holds literally for the dispatch gate, not only merge gates. `kontur audit` reads both kinds and, via a compat shim, still verifies pre-2026-07-23 files that predate the dispatch record.)*
 - **FR-21** The final merge commit carries maker-checker **git trailers** (`Reviewed-by: …` per operator) plus a content-addressed link to the full record. An inline session transcript in the commit message is **optional**; capturing the record itself is not. *(implemented: `Reviewed-by:` trailers per operator plus an `Audit-chain: sha256:<head>` trailer; the content-addressed record (`.kontur/audit-<head>.json`) is committed into the same reviewed merge commit, so the evidence travels with the repo)*
 
 ### Exception handling
@@ -188,6 +188,8 @@ Each gate record captures:
 - **Authorship flag:** `agent` / `hand-edited` / `both`.
 - **Outcome:** `unanimous` / `resolved-after-disagreement`.
 - **Integrity:** hash-chained to the prior gate record; each verdict signed with a per-operator key (non-repudiation).
+
+**Two record kinds (2026-07-23).** The chain is a tagged sequence of entries. A **merge** entry is the gate record above (diff-centric). A **dispatch** entry records the dispatch gate: the verbatim prompt, its author, the operators who signed `go` on it (0–2 signed approvers, each binding to `sha256(prompt)`), an outcome of `dispatched` or `abandoned`, and the same hash-chain integrity. It is prompt-centric — the prompt is a first-class field, not smuggled into a diff slot — and its signatures verify against the prompt hash rather than a diff hash. An `abandoned` entry (a compose killed before dispatch) may carry fewer than two signatures; its integrity rests on the hash chain and whatever approvals were gathered.
 
 Precedent: the Linux kernel already does maker-checker in git via `Signed-off-by:` / `Reviewed-by:` trailers — this formalises and enforces the same pattern.
 

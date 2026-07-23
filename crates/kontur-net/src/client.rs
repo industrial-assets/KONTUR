@@ -302,6 +302,23 @@ impl SessionClient {
         .await
     }
 
+    /// Sign a `go` on the composed prompt at the dispatch gate and send it. The
+    /// signature binds to `prompt_hash(prompt)` and the fixed dispatch gate id,
+    /// so it is valid only for the exact prompt bytes the operator approved — an
+    /// edit changes the hash and the server refuses the stale approval.
+    pub async fn dispatch_approve(&self, prompt: &str) -> io::Result<()> {
+        let verdict = CastVerdict::create(
+            &self.signer,
+            &SystemClock,
+            &kontur_core::dispatch_gate_id(),
+            kontur_core::prompt_hash(prompt),
+            Verdict::Go,
+            ReviewDepth::FullDiff,
+            None,
+        );
+        self.send(ClientMsg::DispatchApprove { verdict }).await
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -473,9 +490,9 @@ mod tests {
         })
         .await;
 
-        // Both signal ready → PlanReview.
-        client_a.ready().await.unwrap();
-        client_b.ready().await.unwrap();
+        // Both approve the composed prompt → PlanReview.
+        client_a.dispatch_approve("add auth gate").await.unwrap();
+        client_b.dispatch_approve("add auth gate").await.unwrap();
 
         next_state_matching(&mut rx_a, |s| {
             matches!(s.phase, WirePhase::PlanReview { .. })

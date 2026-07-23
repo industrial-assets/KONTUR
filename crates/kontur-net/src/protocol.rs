@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Wire protocol version. Bump on any incompatible change to the message
 /// types below. A client that omits the field (pre-versioning build) is read
 /// as version 0, which mismatches any real version and is rejected cleanly.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Serde default for `Hello.protocol` — pre-versioning clients deserialize to 0.
 fn protocol_v0() -> u32 {
@@ -37,6 +37,16 @@ pub enum ClientMsg {
     Ready,
     Cast {
         gate_id: GateId,
+        verdict: CastVerdict,
+    },
+    /// Sign-off on the composed prompt at the dispatch gate. The verdict is a
+    /// `go` signed over `prompt_hash(current prompt)` and the fixed dispatch
+    /// gate id, so each operator signs the exact bytes they approved. Valid only
+    /// during `DispatchReady`; supersedes `Ready` there. Editing the prompt
+    /// changes the hash and invalidates a prior approval (crypto-enforced
+    /// anchoring). When both seats' approvals bind to the current prompt, the
+    /// dispatch is recorded and the session advances to plan review.
+    DispatchApprove {
         verdict: CastVerdict,
     },
     HandEdit {

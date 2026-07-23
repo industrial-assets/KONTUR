@@ -247,9 +247,9 @@ async fn e2e_two_clients_scripted_agent_real_tcp_git() {
             })
             .await;
 
-        // Both ready → PlanReview.
-        client_a.ready().await.unwrap();
-        client_b.ready().await.unwrap();
+        // Both approve the composed prompt → PlanReview.
+        client_a.dispatch_approve("e2e test prompt").await.unwrap();
+        client_b.dispatch_approve("e2e test prompt").await.unwrap();
 
         cur_a
             .await_matching("A:plan-review", |s| {
