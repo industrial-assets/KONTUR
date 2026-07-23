@@ -69,6 +69,15 @@ Persistent chrome, top to bottom. Regions are fixed; only their contents change 
 - **Active region** — swaps between PROMPT (dispatch), PLAN (task-list review), and GATE (sign-off) depending on phase.
 - **Command line** — keyboard entry, always available.
 
+### 4.1 Version footer (both seats)
+
+One DIM line at the very bottom of both consoles, shown when there is something to say — never loud, never affects verdict eligibility. Priority order (at most one message at a time):
+
+1. **Peer-version mismatch** — if the two seats are running different release versions (same protocol, different binary): `peer v{peer} · you v{own} — align versions`. Advisory only.
+2. **Upgrade available** — if the async update check finds a newer release: `v{X.Y.Z} available — brew upgrade kontur`.
+
+Nothing shows when versions match and no upgrade is pending. The footer follows the same small-screen drop behaviour as the host-only agent-log footer — it is the last element yielded when vertical space is tight.
+
 ---
 
 ## 5. Interaction model

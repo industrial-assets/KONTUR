@@ -243,6 +243,20 @@ Practical implications: each agent gets a bordered ASCII panel (status, current 
 
 **Practical, not cheesy.** The discipline that keeps this from tipping into costume: every element on screen must be something an operator reads to decide or acts on — no decorative telemetry (host CPU, fake link sweeps), no false-precision confidence scores, no blanket "CRITICAL" banners. Emphasis is spent once, on the single thing that needs a human; a calm default *is* the authentic control-room principle (post-Three-Mile-Island HMI design is about reducing alarm noise, not manufacturing it). Benchmark against tools an SRE leaves open all day — k9s, lazygit, btop — not a hacker-movie prop. The Cyrillic / version-banner identity flourish stays confined to the header.
 
+### 10.3 Distribution, update check, and peer-version awareness (implemented)
+
+**Homebrew distribution.** Kontur ships as a prebuilt binary via a Homebrew tap (`industrial-assets/kontur`, macOS + Linux). Install: `brew tap industrial-assets/kontur && brew install kontur`. Upgrade: `brew upgrade kontur`. Build-from-source via `cargo install` remains available.
+
+**In-app update check.** On interactive startup (host, join, demo) the binary performs one unauthenticated GET to the GitHub Releases API, caches the result for 24 h at `~/.kontur/update-check.json`, and — if a newer release exists — surfaces a calm DIM footer line on both consoles: `v{X.Y.Z} available — brew upgrade kontur`. The check is:
+
+- **Async and fail-silent** — a network failure, timeout, or non-200 response is silently ignored; startup is never delayed.
+- **No telemetry** — the request carries no identifying payload; only the GitHub Releases JSON is read. No code or data leaves the host machine beyond a standard HTTP GET.
+- **Opt-out** — set `KONTUR_NO_UPDATE_CHECK=1` to disable entirely.
+
+This is consistent with the non-goal "code stays where the team already trusts it": only a hash of a public API response enters the host, and no information about the session or codebase leaves it.
+
+**Peer-version handshake.** The session handshake now carries each seat's release version: `Hello.client_version` (client → host on connect) and `WireSeat.version` (broadcast to both seats via the authoritative `State`). `PROTOCOL_VERSION` is **9** (was 8). If the two seats report different release versions but the same protocol version, both consoles show a DIM footer advisory: `peer v{peer} · you v{own} — align versions`. This is **advisory only** — mismatched release versions never affect verdict eligibility, the four-eyes hold, or any gate outcome. A truly incompatible protocol version (different `PROTOCOL_VERSION`) is still hard-rejected at handshake as before.
+
 ---
 
 ## 11. Differentiation

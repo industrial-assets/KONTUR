@@ -51,10 +51,31 @@ Pair programming assumed a driver at the keyboard and a navigator watching the c
 
 Brutalist: raw, structural, honest. Every element on screen earns its place or it's cut — no decorative telemetry, no confidence theatre, no alarms that don't mean anything. The look is a consequence of supervising many things at once, not a costume applied over it. Calm until it needs you.
 
+## Install
+
+Kontur is distributed as a Homebrew tap (macOS + Linux):
+
+```sh
+brew tap industrial-assets/kontur
+brew install kontur
+```
+
+Upgrade when a new version ships:
+
+```sh
+brew upgrade kontur
+```
+
+Kontur tells you in a calm footer line when a newer release is available, and nudges you and your co-operator when your two versions differ. To disable the check entirely, set `KONTUR_NO_UPDATE_CHECK=1`.
+
+One-liner alternative (auto-taps): `brew install industrial-assets/kontur/kontur`.
+
+---
+
 ## Running it
 
 ```sh
-# Install (from a clone of this repo):
+# Build from source (clone required):
 cargo install --path crates/kontur-tui
 
 # Primary path — host in your current folder with a real Claude Code agent.
@@ -165,3 +186,7 @@ there is no `nc` or other external-tool dependency on any platform.
 ## Built on
 
 MCP as the action/enforcement plane (consequential actions routed through hosted MCP servers and gated for approval), with Claude Code as the first agent backend. The two-signatory sign-off is layered over MCP's single-approver gate.
+
+## License
+
+MIT OR Apache-2.0.
