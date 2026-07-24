@@ -24,6 +24,17 @@ The north star: an operator who has used k9s or lazygit should feel at home in m
 5. **The look is a consequence, not a costume.** Density and monospace fall out of supervising many things at once; the Cyrillic/version identity stays in the banner and never leaks into functional labels.
 6. **Two operators, one truth.** Both see the same authoritative fleet state — except where independence *requires* divergence (blind sign-off, §5.4).
 
+### 2.1 Visual language — palette & type
+
+The console paints its own **full branded ground** rather than inheriting the operator's terminal theme, so both seats read the identical control room. The palette lives in `crates/kontur-tui/src/theme.rs` and is mirrored, token-for-token, by the **KONTUR Design System** (its `tokens/colors.css` was itself sampled from this render). Any change to one moves with the other.
+
+- **Monochrome by intent.** A warm near-black ground (`#0e0d0c`) under a bone foreground ramp — strong `#ece7db` → default `#d6d0c4` → dim `#8a8578` → faint `#5b574d` — with hairline borders in `#322f28`. At most one or two hues on screen at once.
+- **One identity accent.** Brick red (`#bf3b26`, sampled from the logo dot) is the *only* brand colour, and is spent sparingly: the Cyrillic КОНТУР in the banner, the rule under the boot wordmark, and a fleet row that needs *your* key. It never dresses functional chrome.
+- **Functional colour is confined to what the console decodes.** Diff **add = green** (`#7fa65c`), **remove = red** (`#db4a2f`), **hunk = cyan** (`#5b9a97`); verdict **GO = green**, **NO-GO = red**; a failed command / broken chain / failed merge is red; **amber** (`#c8923a`) is caution (escalation notes) and is never loud. A **sealed** key stays neutral bone — its verdict must never read from its colour (blind review, §5.4).
+- **Two loud treatments, and only ever one on screen** (emphasis is spent once): **reverse-video** (bone ground, black ink) for the single thing that needs a human now — the attention row, a join request; and **alarm** (brick-red ground, bone ink), the single loudest treatment, reserved for a frozen session (HOST LOST).
+- **Square, flat, hairline.** Borders are the only structural device — 1px box-drawing rectangles with UPPERCASE mono titles on the top rule. No shadow, no gradient, no glow, no corner radius. "Elevation" is a lighter fill, never depth.
+- **Type register.** Everything functional is monospace (the operator's terminal face). The display/identity flourish — the block-glyph wordmark, the Cyrillic КОНТУР — stays in the banner and boot card and never leaks into functional labels (principle 5).
+
 ---
 
 ## 3. Who's in the seat
@@ -119,10 +130,11 @@ A full session, phase by phase.
 
 ### 6.0 Boot
 On entry (host, join, or demo) the console shows a brief identity card —
-the КОНТУР wordmark in block glyphs, the version, and one provenance line
-(© Industrial Assets · open source · no warranty · repo URL) — centred in
-the alternate screen for about a second before the session view takes over.
-No animation, no input; it is a nameplate, not a splash.
+the КОНТУР wordmark in strong-bone block glyphs, a **brick-red rule** beneath
+it (the one identity accent, §2.1), the Cyrillic КОНТУР in red with the version,
+and one provenance line (© Industrial Assets · open source · no warranty · repo
+URL) — centred on the branded near-black ground for about a second before the
+session view takes over. No animation, no input; it is a nameplate, not a splash.
 
 ### 6.1 Session start — idle
 Both linked, no fleet, empty prompt buffer. The console invites an instruction.

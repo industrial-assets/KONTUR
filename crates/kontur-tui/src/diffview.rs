@@ -1,8 +1,10 @@
 //! Diff viewer: parse unified-diff text into styled ratatui lines, file-list
 //! extraction, scroll clamping, and a pure helper for $EDITOR selection.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::theme;
 
 // ---------------------------------------------------------------------------
 // Scroll state
@@ -46,11 +48,11 @@ fn classify_line(line: &str) -> Style {
         // terminal background.
         Style::default().add_modifier(Modifier::BOLD)
     } else if line.starts_with("@@") {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme::DIFF_HUNK)
     } else if line.starts_with('+') {
-        Style::default().fg(Color::Green)
+        Style::default().fg(theme::DIFF_ADD)
     } else if line.starts_with('-') {
-        Style::default().fg(Color::Red)
+        Style::default().fg(theme::DIFF_DEL)
     } else {
         Style::default()
     }
@@ -121,7 +123,7 @@ pub fn editor_command(env_val: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
 
     // -----------------------------------------------------------------------
     // styled_diff_lines
@@ -176,8 +178,8 @@ mod tests {
         let span = &hunk.spans[0];
         assert_eq!(
             span.style.fg,
-            Some(Color::Cyan),
-            "@@ line should be cyan; style={:?}",
+            Some(theme::DIFF_HUNK),
+            "@@ line should be the hunk (cyan) colour; style={:?}",
             span.style
         );
     }
@@ -190,8 +192,8 @@ mod tests {
         let span = &added.spans[0];
         assert_eq!(
             span.style.fg,
-            Some(Color::Green),
-            "+ line should be green; style={:?}",
+            Some(theme::DIFF_ADD),
+            "+ line should be the addition (green) colour; style={:?}",
             span.style
         );
     }
@@ -204,8 +206,8 @@ mod tests {
         let span = &removed.spans[0];
         assert_eq!(
             span.style.fg,
-            Some(Color::Red),
-            "- line should be red; style={:?}",
+            Some(theme::DIFF_DEL),
+            "- line should be the deletion (red) colour; style={:?}",
             span.style
         );
     }

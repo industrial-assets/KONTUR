@@ -13,6 +13,7 @@ pub mod link;
 pub mod planedit;
 pub mod remote;
 pub mod render;
+pub mod theme;
 pub mod update;
 pub mod view;
 pub mod viewmodel;

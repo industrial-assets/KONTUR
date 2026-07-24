@@ -2,10 +2,11 @@
 //! console appears. Brutalist — name, version, provenance; nothing animated.
 
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
+
+use crate::theme;
 
 /// How long the boot screen holds before the console takes over.
 pub const BOOT_HOLD_MS: u64 = 1000;
@@ -22,25 +23,39 @@ const WORDMARK: [&str; 6] = [
 
 /// The boot card's lines. Pure; tested.
 pub fn boot_lines(version: &str) -> Vec<Line<'static>> {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let width = WORDMARK[0].chars().count();
+    // The wordmark in strong bone.
     let mut lines: Vec<Line<'static>> = WORDMARK
         .iter()
-        .map(|row| Line::styled((*row).to_owned(), bold))
+        .map(|row| Line::styled((*row).to_owned(), theme::strong()))
         .collect();
+    // The brick-red rule under the wordmark — the one identity accent.
+    lines.push(Line::styled("━".repeat(width), theme::accent()));
     lines.push(Line::raw(""));
-    lines.push(Line::raw(format!("КОНТУР · v{version} · two keys, always")));
+    // Identity line: Cyrillic КОНТУР in brick red, the rest calm bone.
+    lines.push(Line::from(vec![
+        Span::styled("КОНТУР", theme::accent()),
+        Span::styled(
+            format!(" · v{version} · two keys, always"),
+            theme::dim(),
+        ),
+    ]));
     lines.push(Line::raw(""));
-    lines.push(Line::raw(
-        "© 2026 Industrial Assets · open source · no warranty",
+    lines.push(Line::styled(
+        "© 2026 Industrial Assets · open source · no warranty".to_owned(),
+        theme::faint(),
     ));
-    lines.push(Line::raw(
-        "licence terms: github.com/industrial-assets/kontur",
+    lines.push(Line::styled(
+        "licence terms: github.com/industrial-assets/kontur".to_owned(),
+        theme::faint(),
     ));
     lines
 }
 
 /// Render the boot card centred in the full frame.
 pub fn render_boot(frame: &mut Frame, version: &str) {
+    // Paint the branded ground so the identity card sits on near-black bone.
+    frame.render_widget(Block::default().style(theme::base()), frame.area());
     let lines = boot_lines(version);
     let height = lines.len() as u16;
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16;

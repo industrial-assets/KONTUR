@@ -1,12 +1,12 @@
 use std::cell::Cell;
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::diffview::styled_diff_lines;
+use crate::theme;
 use crate::view::{ActiveRegion, Attention, CursorTarget, KeyStatus, SessionView};
 
 /// Draw the whole console. Pure: no I/O, no engine calls.
@@ -24,6 +24,11 @@ pub fn render(
     log_scroll: usize,
     diff_viewport: &Cell<u16>,
 ) {
+    // Full branded ground: paint the whole frame bone-on-near-black once, so
+    // every widget that leaves fg/bg unset inherits the KONTUR surface rather
+    // than the operator's terminal theme. Both seats see the same control room.
+    frame.render_widget(Block::default().style(theme::base()), frame.area());
+
     let invite_rows = match &view.invite {
         Some(text) => (text.lines().count() as u16) + 3,
         None => 0,
@@ -50,7 +55,7 @@ pub fn render(
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 " HOST LOST — session frozen · casts will not land · [q] quit",
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                theme::alarm(),
             ))),
             rows[0],
         );
@@ -60,7 +65,7 @@ pub fn render(
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" JOIN REQUEST — Operator B fingerprint {fp} · [a] approve · [x] reject"),
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                theme::reverse(),
             ))),
             rows[0],
         );
@@ -214,16 +219,16 @@ fn help_overlay(frame: &mut Frame, view: &SessionView) {
             if l.starts_with(' ') {
                 Line::from(l)
             } else {
-                Line::from(Span::styled(
-                    l,
-                    Style::default().add_modifier(Modifier::BOLD),
-                ))
+                Line::from(Span::styled(l, theme::strong()))
             }
         })
         .collect();
     frame.render_widget(Clear, area);
+    // Repaint the branded ground under the overlay (Clear resets to terminal
+    // default), so the help card sits on the same near-black surface.
+    frame.render_widget(Block::default().style(theme::base()), area);
     frame.render_widget(
-        Paragraph::new(body).block(Block::bordered().title("KEYS  [?] close")),
+        Paragraph::new(body).block(theme::panel("KEYS  [?] close")),
         area,
     );
 }
@@ -239,9 +244,9 @@ fn centre(area: Rect, w: u16, h: u16) -> Rect {
 
 fn attention_line(frame: &mut Frame, area: Rect, att: &Attention) {
     let style = if att.loud {
-        Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        theme::reverse()
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        theme::dim()
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(format!(" {}", att.text), style))),
@@ -252,33 +257,35 @@ fn attention_line(frame: &mut Frame, area: Rect, att: &Attention) {
 fn invite(frame: &mut Frame, area: Rect, link: &str) {
     let mut lines: Vec<Line> = link
         .lines()
-        .map(|l| {
-            Line::from(Span::styled(
-                format!(" {l}"),
-                Style::default().add_modifier(Modifier::BOLD),
-            ))
-        })
+        .map(|l| Line::from(Span::styled(format!(" {l}"), theme::strong())))
         .collect();
-    lines.push(Line::from(
+    lines.push(Line::from(Span::styled(
         " send over a private channel — the link IS the operator's key",
-    ));
+        theme::dim(),
+    )));
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title("INVITE — OPERATOR NOT LINKED"))
+            .block(theme::panel("INVITE — OPERATOR NOT LINKED"))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
 fn banner(frame: &mut Frame, area: Rect, view: &SessionView) {
-    let text = format!(
-        "[ КОНТУР  //  co-op session {}  //  v{} ]",
-        view.banner.session, view.banner.version
-    );
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().add_modifier(Modifier::BOLD)),
-        area,
-    );
+    // The identity register — the ONE place the brick-red accent leaks in: the
+    // Cyrillic КОНТУР wordmark. The session/version stamp stays calm bone.
+    let line = Line::from(vec![
+        Span::styled("[ ", theme::strong()),
+        Span::styled("КОНТУР", theme::accent()),
+        Span::styled(
+            format!(
+                "  //  co-op session {}  //  v{} ]",
+                view.banner.session, view.banner.version
+            ),
+            theme::strong(),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn status(frame: &mut Frame, area: Rect, view: &SessionView) {
@@ -305,7 +312,7 @@ fn stations(frame: &mut Frame, area: Rect, view: &SessionView) {
     let cols =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).split(area);
     for (i, st) in view.stations.iter().enumerate() {
-        let block = Block::bordered().title(st.label.clone());
+        let block = theme::panel(st.label.clone());
         // The station title already names the seat (e.g. "Operator A [Host]"),
         // so the body carries only the activity — no redundant role prefix.
         let body = if st.afk {
@@ -314,11 +321,7 @@ fn stations(frame: &mut Frame, area: Rect, view: &SessionView) {
             st.activity.clone()
         };
         let p = if st.afk {
-            Paragraph::new(Span::styled(
-                body,
-                Style::default().add_modifier(Modifier::DIM),
-            ))
-            .block(block)
+            Paragraph::new(Span::styled(body, theme::dim())).block(block)
         } else {
             Paragraph::new(body).block(block)
         };
@@ -337,7 +340,7 @@ fn task_bar(frame: &mut Frame, area: Rect, view: &SessionView) {
         .replace('\n', " ");
     frame.render_widget(
         Paragraph::new(Line::from(format!(" {text}")))
-            .block(Block::bordered().title("TASK"))
+            .block(theme::panel("TASK"))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -371,11 +374,11 @@ fn render_plan_progress(frame: &mut Frame, area: Rect, plan: &crate::view::PlanP
         .map(|(off, t)| {
             let i = start + off;
             let (marker, style) = if i < done {
-                ("✓", Style::default().add_modifier(Modifier::DIM))
+                ("✓", theme::success())
             } else if i == done {
-                ("▶", Style::default().add_modifier(Modifier::BOLD))
+                ("▶", theme::strong())
             } else {
-                ("·", Style::default().add_modifier(Modifier::DIM))
+                ("·", theme::dim())
             };
             Line::from(Span::styled(format!(" {marker} {} {t}", i + 1), style))
         })
@@ -383,7 +386,7 @@ fn render_plan_progress(frame: &mut Frame, area: Rect, plan: &crate::view::PlanP
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(format!("PLAN · {done}/{total}")))
+            .block(theme::panel(format!("PLAN · {done}/{total}")))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -401,17 +404,14 @@ fn fleet(frame: &mut Frame, area: Rect, view: &SessionView) {
             };
             let text = format!(" {:<10} {}", a.id, marker);
             if a.needs_signoff {
-                Line::from(Span::styled(
-                    text,
-                    Style::default().add_modifier(Modifier::BOLD),
-                ))
+                Line::from(Span::styled(text, theme::needs_you()))
             } else {
                 Line::from(text)
             }
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title("FLEET")),
+        Paragraph::new(lines).block(theme::panel("FLEET")),
         area,
     );
 }
@@ -448,11 +448,11 @@ fn log(frame: &mut Frame, area: Rect, view: &SessionView, log_scroll: usize) {
                 s.push_str(&format!("{:<8} ", l.who));
             }
             s.push_str(&l.text);
-            Line::from(s)
+            Line::from(Span::styled(s, theme::dim()))
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
+        Paragraph::new(lines).block(theme::panel(title)),
         area,
     );
 }
@@ -593,7 +593,7 @@ fn render_files_bar(
         Line::from(" [tab] select · [e] edit · [c] claim"),
     ];
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(format!("FILES — {}", card.gate_id))),
+        Paragraph::new(lines).block(theme::panel(format!("FILES — {}", card.gate_id))),
         area,
     );
 }
@@ -625,7 +625,7 @@ fn render_diff_pane(
     };
     frame.render_widget(
         Paragraph::new(body)
-            .block(Block::bordered().title(title))
+            .block(theme::panel(title))
             .scroll((scroll, 0)),
         area,
     );
@@ -640,7 +640,7 @@ fn render_discuss(frame: &mut Frame, area: Rect, card: &crate::view::GateCard) {
         .collect();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title("DISCUSS  [d] note"))
+            .block(theme::panel("DISCUSS  [d] note"))
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -652,46 +652,71 @@ fn render_verdict_bar(frame: &mut Frame, area: Rect, card: &crate::view::GateCar
     if let Some((cmd, code)) = &card.last_cmd {
         let short: String = cmd.chars().take(48).collect();
         if *code == 0 {
-            lines.push(Line::from(format!("   last cmd: {short} · exit 0")));
+            lines.push(Line::from(Span::styled(
+                format!("   last cmd: {short} · exit 0"),
+                theme::dim(),
+            )));
         } else {
             lines.push(Line::from(Span::styled(
                 format!("   last cmd: {short} · FAILED exit {code}"),
-                Style::default().add_modifier(Modifier::BOLD),
+                theme::failure(),
             )));
         }
     }
     for key in &card.keys {
-        let status = match key.status {
-            KeyStatus::Awaiting => "□ awaiting verdict",
-            KeyStatus::Sealed => "■ cast — sealed",
-            KeyStatus::Go => "■ GO",
-            KeyStatus::NoGo => "■ NO-GO",
+        // Verdict colour is a functional status — but a *sealed* key must never
+        // reveal its value through colour (blind review), so it stays neutral.
+        let (status, style) = match key.status {
+            KeyStatus::Awaiting => ("□ awaiting verdict", theme::awaiting()),
+            KeyStatus::Sealed => ("■ cast — sealed", theme::sealed()),
+            KeyStatus::Go => ("■ GO", theme::go()),
+            KeyStatus::NoGo => ("■ NO-GO", theme::nogo()),
         };
-        lines.push(Line::from(format!("   KEY {:<12} {}", key.label, status)));
+        lines.push(Line::from(Span::styled(
+            format!("   KEY {:<12} {}", key.label, status),
+            style,
+        )));
     }
     if card.escalation_required {
         lines.push(Line::from(Span::styled(
             "   escalation required — co-signer must be a non-editor",
-            Style::default().add_modifier(Modifier::BOLD),
+            theme::caution(),
         )));
     }
-    lines.push(Line::from(
+    lines.push(Line::from(Span::styled(
         " [g] go · [r] no-go+steer · [e] edit · [K] abandon",
-    ));
+        theme::dim(),
+    )));
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title("VERDICT"))
+            .block(theme::panel("VERDICT"))
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+/// The tamper-evidence line for a closed session: a green ✓ when the audit
+/// chain verified, a loud red ✗ when it did not.
+fn chain_line(verified: bool) -> Line<'static> {
+    if verified {
+        Line::from(Span::styled(
+            " chain verified ✓ (tamper-evident)",
+            theme::success(),
+        ))
+    } else {
+        Line::from(Span::styled(" chain BROKEN ✗", theme::failure()))
+    }
 }
 
 fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinner_frame: u8) {
     match active {
         ActiveRegion::Idle => {
             frame.render_widget(
-                Paragraph::new(" no task dispatched — draft an instruction to begin")
-                    .block(Block::bordered().title("PROMPT")),
+                Paragraph::new(Span::styled(
+                    " no task dispatched — draft an instruction to begin",
+                    theme::dim(),
+                ))
+                .block(theme::panel("PROMPT")),
                 area,
             );
         }
@@ -700,10 +725,10 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
             // for a human to do here, so it stays dim.
             let line = Line::from(Span::styled(
                 format!(" {} {note}…", spinner_glyph(spinner_frame)),
-                Style::default().add_modifier(Modifier::DIM),
+                theme::dim(),
             ));
             frame.render_widget(
-                Paragraph::new(line).block(Block::bordered().title("AGENT")),
+                Paragraph::new(line).block(theme::panel("AGENT")),
                 area,
             );
         }
@@ -716,16 +741,17 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                 .split('\n')
                 .map(|l| Line::from(format!(" {l}")))
                 .collect();
-            lines.push(Line::from(format!(
-                " DISPATCH GATE   A ⟨{}⟩ approved   B ⟨{}⟩ approved",
-                a_mark, b_mark
+            lines.push(Line::from(Span::styled(
+                format!(" DISPATCH GATE   A ⟨{a_mark}⟩ approved   B ⟨{b_mark}⟩ approved"),
+                theme::strong(),
             )));
-            lines.push(Line::from(
+            lines.push(Line::from(Span::styled(
                 " [p] edit prompt · [y] approve — signs the prompt, needs both",
-            ));
+                theme::dim(),
+            )));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title("PROMPT"))
+                    .block(theme::panel("PROMPT"))
                     .wrap(Wrap { trim: false }),
                 area,
             );
@@ -758,15 +784,16 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                     Line::from(format!(" {} t{} {}", marker, i + 1, t))
                 })
                 .collect();
-            lines.push(Line::from(format!(
-                " PLAN GATE   A ⟨{}⟩ ready   B ⟨{}⟩ ready",
-                a_mark, b_mark
+            lines.push(Line::from(Span::styled(
+                format!(" PLAN GATE   A ⟨{a_mark}⟩ ready   B ⟨{b_mark}⟩ ready"),
+                theme::strong(),
             )));
-            lines.push(Line::from(
+            lines.push(Line::from(Span::styled(
                 " [r] steer replan · j/k select · e edit · d delete · </> move · [y] approve — needs both",
-            ));
+                theme::dim(),
+            )));
             frame.render_widget(
-                Paragraph::new(lines).block(Block::bordered().title(title)),
+                Paragraph::new(lines).block(theme::panel(title)),
                 area,
             );
         }
@@ -803,15 +830,16 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                 }
                 lines.push(Line::from(Span::styled(
                     format!("      · {status}"),
-                    Style::default().add_modifier(Modifier::DIM),
+                    theme::dim(),
                 )));
             }
-            lines.push(Line::from(
+            lines.push(Line::from(Span::styled(
                 " [j]/[k] question · [1-9] pick · [a] custom — both must answer",
-            ));
+                theme::dim(),
+            )));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title("CLARIFY — agent needs answers"))
+                    .block(theme::panel("CLARIFY — agent needs answers"))
                     .wrap(Wrap { trim: true }),
                 area,
             );
@@ -831,35 +859,42 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
             for (i, (title, detail)) in streams.iter().enumerate() {
                 lines.push(Line::from(Span::styled(
                     format!("  {}. {title}", i + 1),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    theme::strong(),
                 )));
                 lines.push(Line::from(format!("     {detail}")));
             }
-            lines.push(Line::from(format!(
-                " SPLIT GATE   A ⟨{}⟩ approve   B ⟨{}⟩ approve",
-                a_mark, b_mark
+            lines.push(Line::from(Span::styled(
+                format!(" SPLIT GATE   A ⟨{a_mark}⟩ approve   B ⟨{b_mark}⟩ approve"),
+                theme::strong(),
             )));
-            lines.push(Line::from(
+            lines.push(Line::from(Span::styled(
                 " [y] approve (needs both) · [n] decline (keeps it solo)",
-            ));
+                theme::dim(),
+            )));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(Block::bordered().title("SPLIT — agent asks to parallelize"))
+                    .block(theme::panel("SPLIT — agent asks to parallelize"))
                     .wrap(Wrap { trim: true }),
                 area,
             );
         }
         ActiveRegion::Intervention(card) => {
             let lines = vec![
-                Line::from(format!(
-                    " NO-GO · {} — a remedy is required (steer or edit)",
-                    card.gate_id
+                Line::from(Span::styled(
+                    format!(
+                        " NO-GO · {} — a remedy is required (steer or edit)",
+                        card.gate_id
+                    ),
+                    theme::nogo(),
                 )),
                 Line::from(format!(" steer > {}", card.steer)),
-                Line::from(" [↵] send steer · [esc] cancel"),
+                Line::from(Span::styled(
+                    " [↵] send steer · [esc] cancel",
+                    theme::dim(),
+                )),
             ];
             frame.render_widget(
-                Paragraph::new(lines).block(Block::bordered().title("INTERVENTION")),
+                Paragraph::new(lines).block(theme::panel("INTERVENTION")),
                 area,
             );
         }
@@ -868,17 +903,13 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                 let lines = vec![
                     Line::from(Span::styled(
                         " SESSION ABANDONED — nothing merged (audit chain intact)",
-                        Style::default().add_modifier(Modifier::BOLD),
+                        theme::strong(),
                     )),
                     Line::from(format!(" {} gates resolved before abandon", summary.gates)),
-                    Line::from(if summary.chain_verified {
-                        " chain verified ✓ (tamper-evident)".to_string()
-                    } else {
-                        " chain BROKEN ✗".to_string()
-                    }),
+                    chain_line(summary.chain_verified),
                 ];
                 frame.render_widget(
-                    Paragraph::new(lines).block(Block::bordered().title("SESSION ABANDONED")),
+                    Paragraph::new(lines).block(theme::panel("SESSION ABANDONED")),
                     area,
                 );
             } else {
@@ -888,22 +919,21 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
                         " Reviewed-by: {}",
                         summary.reviewers.join("   Reviewed-by: ")
                     )),
-                    Line::from(if summary.chain_verified {
-                        " chain verified ✓ (tamper-evident)".to_string()
-                    } else {
-                        " chain BROKEN ✗".to_string()
-                    }),
+                    chain_line(summary.chain_verified),
                 ];
                 if summary.merged {
-                    lines.push(Line::from(" merged to repo ✓"));
+                    lines.push(Line::from(Span::styled(
+                        " merged to repo ✓",
+                        theme::success(),
+                    )));
                 } else {
                     lines.push(Line::from(Span::styled(
                         " MERGE FAILED — work NOT landed in git (audit chain intact)",
-                        Style::default().add_modifier(Modifier::BOLD),
+                        theme::failure(),
                     )));
                 }
                 frame.render_widget(
-                    Paragraph::new(lines).block(Block::bordered().title("SESSION COMPLETE")),
+                    Paragraph::new(lines).block(theme::panel("SESSION COMPLETE")),
                     area,
                 );
             }
@@ -917,11 +947,10 @@ fn render_phase_card(frame: &mut Frame, area: Rect, active: &ActiveRegion, spinn
 /// Host-only dim footer naming the agent's session log, so the host can tail
 /// the agent's narration without hunting for the path.
 fn agent_log_footer(frame: &mut Frame, area: Rect, path: &str) {
-    use ratatui::style::Color;
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" agent log: {path}"),
-            Style::default().fg(Color::DarkGray),
+            theme::faint(),
         ))),
         area,
     );
@@ -932,10 +961,7 @@ fn agent_log_footer(frame: &mut Frame, area: Rect, path: &str) {
 /// the gate.
 fn version_footer(frame: &mut Frame, area: Rect, notice: &str) {
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!(" {notice}"),
-            Style::default().add_modifier(Modifier::DIM),
-        ))),
+        Paragraph::new(Line::from(Span::styled(format!(" {notice}"), theme::dim()))),
         area,
     );
 }
@@ -943,11 +969,7 @@ fn version_footer(frame: &mut Frame, area: Rect, notice: &str) {
 fn command(frame: &mut Frame, area: Rect, view: &SessionView) {
     let text = match &view.notice {
         Some(msg) => {
-            use ratatui::text::Line;
-            let line = Line::from(Span::styled(
-                format!(" > {msg}"),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
+            let line = Line::from(Span::styled(format!(" > {msg}"), theme::strong()));
             Paragraph::new(line)
         }
         None => Paragraph::new(" > "),
@@ -1260,6 +1282,33 @@ mod tests {
             !rendered.contains("MERGE FAILED"),
             "must not show failure copy when merge succeeded"
         );
+    }
+
+    /// The branded ground must reach the buffer: body cells inherit the
+    /// near-black bg, and the banner КОНТУР carries the one brick-red accent.
+    #[test]
+    fn branded_ground_and_red_accent_apply() {
+        let view = minimal_view(ActiveRegion::Idle);
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render(f, &view, 0, 0, 0, &std::cell::Cell::new(0)))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // Every cell sits on the branded ground (the whole-frame base fill).
+        let ground = buf
+            .content()
+            .iter()
+            .all(|c| c.bg == crate::theme::GROUND);
+        assert!(ground, "all cells must inherit the near-black ground bg");
+
+        // The banner's Cyrillic КОНТУР is the one place the red accent appears.
+        let has_red = buf
+            .content()
+            .iter()
+            .any(|c| c.fg == crate::theme::RED && c.symbol() == "К");
+        assert!(has_red, "banner КОНТУР must render in the brick-red accent");
     }
 
     /// Gate: diff title visible, verdict bar keys visible.
