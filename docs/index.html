@@ -84,6 +84,15 @@ a:hover { border-bottom-color:var(--k-bone-300); }
 .btn-primary { background:var(--k-red); border-color:var(--k-red); color:var(--k-bone-100); }
 .btn-primary:hover { background:var(--k-red-bright); border-color:var(--k-red-bright); }
 
+/* Product shot — the two-seat console. Square, hairline, flat. */
+.shot { background:var(--k-ink); border-bottom:var(--bw) solid var(--k-line); }
+.shot .frame { max-width:1100px; margin:0 auto; padding:40px 20px; }
+.shot figure { margin:0; border:var(--bw) solid var(--k-line-2); background:var(--k-black); }
+.shot img { display:block; width:100%; height:auto; }
+.shot figcaption { padding:9px 13px; border-top:var(--bw) solid var(--k-line);
+  color:var(--k-dim); font-size:11px; text-transform:uppercase; letter-spacing:var(--tracking-label); }
+.shot figcaption b { color:var(--k-bone-300); font-weight:600; }
+
 /* Sections */
 section { padding:48px 0; border-bottom:var(--bw) solid var(--k-line); }
 h2 { font-family:var(--font-mono); font-weight:600; text-transform:uppercase;
@@ -175,6 +184,14 @@ footer .prov a:hover { color:var(--k-bone-200); }
     <a class="btn" href="https://github.com/industrial-assets/kontur">source →</a>
   </div>
 </div></header>
+
+<section class="shot"><div class="frame">
+  <figure>
+    <img src="assets/screenshot.png" width="6400" height="3600" loading="lazy"
+      alt="Two KONTUR consoles side by side — Operator A [Host] and Operator B — each showing the fleet, activity log, and a diff under review at a gate.">
+    <figcaption>▸ <b>two seats · one console</b> — host and operator, co-signing the same fleet</figcaption>
+  </figure>
+</div></section>
 
 <section id="guarantee" class="guarantee"><div class="wrap">
   <div class="card">
