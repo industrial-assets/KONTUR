@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "kontur-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ciborium",
  "ed25519-dalek",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "kontur-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kontur-core",
  "rmcp",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "kontur-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kontur-core",
  "kontur-mcp",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "kontur-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.2.17",
  "kontur-core",
