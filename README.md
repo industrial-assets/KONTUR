@@ -18,6 +18,28 @@ KONTUR (kohn-toor) is a terminal-native workstation where two engineers jointly 
 
 It exists for the place solo agentic tooling can't go: production environments where _the agent wrote it and one person glanced at it_ isn't good enough, and segregation of duties is the rule, not a nicety.
 
+## Install
+
+Kontur is distributed as a Homebrew tap (macOS + Linux):
+
+```sh
+brew tap industrial-assets/kontur
+brew trust industrial-assets/kontur   # once: recent Homebrew requires trusting third-party taps
+brew install kontur
+```
+
+> Recent Homebrew versions refuse to load formulae from an untrusted third-party tap. Run `brew trust industrial-assets/kontur` once (after tapping) before installing or upgrading. Older Homebrew versions don't have `brew trust` and will error harmlessly — skip that line if so.
+
+Upgrade when a new version ships:
+
+```sh
+brew upgrade kontur
+```
+
+Kontur tells you in a calm footer line when a newer release is available, and nudges you and your co-operator when your two versions differ. To disable the check entirely, set `KONTUR_NO_UPDATE_CHECK=1`.
+
+One-liner alternative (auto-taps): `brew install industrial-assets/kontur/kontur` (still run `brew trust industrial-assets/kontur` first).
+
 ## The idea
 
 Pair programming assumed a driver at the keyboard and a navigator watching the cursor. Agentic development took the keyboard away — so pairing moves up a layer. The **Host** runs the session and provides the agents (the Claude Code connection lives on their machine); the **Operator** joins over the network. Both construct and review instructions, both watch the fleet, and both independently approve every change. Maker-checker, with the agent as maker and two co-equal humans as checkers.
@@ -50,30 +72,6 @@ Pair programming assumed a driver at the keyboard and a navigator watching the c
 ## Principles
 
 Brutalist: raw, structural, honest. Every element on screen earns its place or it's cut — no decorative telemetry, no confidence theatre, no alarms that don't mean anything. The look is a consequence of supervising many things at once, not a costume applied over it. Calm until it needs you.
-
-## Install
-
-Kontur is distributed as a Homebrew tap (macOS + Linux):
-
-```sh
-brew tap industrial-assets/kontur
-brew trust industrial-assets/kontur   # once: recent Homebrew requires trusting third-party taps
-brew install kontur
-```
-
-> Recent Homebrew versions refuse to load formulae from an untrusted third-party tap. Run `brew trust industrial-assets/kontur` once (after tapping) before installing or upgrading. Older Homebrew versions don't have `brew trust` and will error harmlessly — skip that line if so.
-
-Upgrade when a new version ships:
-
-```sh
-brew upgrade kontur
-```
-
-Kontur tells you in a calm footer line when a newer release is available, and nudges you and your co-operator when your two versions differ. To disable the check entirely, set `KONTUR_NO_UPDATE_CHECK=1`.
-
-One-liner alternative (auto-taps): `brew install industrial-assets/kontur/kontur` (still run `brew trust industrial-assets/kontur` first).
-
----
 
 ## Running it
 
