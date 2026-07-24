@@ -1,262 +1,713 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KONTUR · КОНТУР — two keys, always</title>
-<meta name="description" content="A brutalist CLI for high-efficiency agentic pair programming. Two engineers, one console, a fleet of agents — and nothing ships without both keys.">
-<meta name="theme-color" content="#0e0d0c">
-<link rel="icon" href="assets/kontur-icon.png">
-<link rel="apple-touch-icon" href="assets/kontur-icon.png">
-<!-- Open Graph / social -->
-<meta property="og:type" content="website">
-<meta property="og:title" content="KONTUR — two keys, always">
-<meta property="og:description" content="A brutalist CLI for high-efficiency agentic pair programming. Nothing an agent writes reaches main without two independent human approvals.">
-<meta property="og:image" content="assets/kontur-og.jpg">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="KONTUR — two keys, always">
-<meta name="twitter:description" content="Two engineers jointly supervise a fleet of coding agents. Nothing ships without both keys.">
-<meta name="twitter:image" content="assets/kontur-og.jpg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Oswald:wght@500;600;700&display=swap" rel="stylesheet">
-<style>
-/* KONTUR design-system tokens (tokens/colors.css, typography.css, borders.css,
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KONTUR · КОНТУР — two keys, always</title>
+    <meta
+      name="description"
+      content="A brutalist CLI for high-efficiency agentic pair programming. Two engineers, one console, a fleet of agents — and nothing ships without both keys."
+    />
+    <meta name="theme-color" content="#0e0d0c" />
+    <link rel="icon" href="assets/kontur-icon.png" />
+    <link rel="apple-touch-icon" href="assets/kontur-icon.png" />
+    <!-- Open Graph / social -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="KONTUR — two keys, always" />
+    <meta
+      property="og:description"
+      content="A brutalist CLI for high-efficiency agentic pair programming. Nothing an agent writes reaches main without two independent human approvals."
+    />
+    <meta property="og:image" content="assets/kontur-og.jpg" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="KONTUR — two keys, always" />
+    <meta
+      name="twitter:description"
+      content="Two engineers jointly supervise a fleet of coding agents. Nothing ships without both keys."
+    />
+    <meta name="twitter:image" content="assets/kontur-og.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Oswald:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* KONTUR design-system tokens (tokens/colors.css, typography.css, borders.css,
    motion.css) — a monochrome control-room palette: bone on warm near-black,
    emphasis by weight/dim/reverse, one brick-red identity accent. Square, flat,
    hairline. No shadow, no gradient, no radius. */
-:root {
-  --k-black:#0e0d0c; --k-ink:#131210; --k-panel:#17150f; --k-panel-2:#1e1c15;
-  --k-bone-100:#ece7db; --k-bone-200:#d6d0c4; --k-bone-300:#b3ad9f;
-  --k-dim:#8a8578; --k-faint:#5b574d; --k-line:#322f28; --k-line-2:#47433a;
-  --k-red:#bf3b26; --k-red-bright:#db4a2f; --k-red-ink:#2a120c;
-  --k-green:#7fa65c; --k-cyan:#5b9a97; --k-amber:#c8923a;
-  --font-mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --font-display:"Oswald","Arial Narrow","Helvetica Neue",sans-serif;
-  --bw:1px; --bw-heavy:2px;
-  --tracking-label:0.08em; --tracking-wide:0.14em; --tracking-plate:0.22em;
-}
-* { box-sizing:border-box; }
-html { -webkit-text-size-adjust:100%; }
-body {
-  margin:0; background:var(--k-black); color:var(--k-bone-200);
-  font-family:var(--font-mono); font-size:14px; line-height:1.6;
-  font-weight:400; -webkit-font-smoothing:antialiased;
-}
-a { color:var(--k-bone-100); text-decoration:none; border-bottom:1px solid var(--k-line-2); }
-a:hover { border-bottom-color:var(--k-bone-300); }
-::selection { background:var(--k-bone-200); color:var(--k-black); }
-.wrap { max-width:860px; margin:0 auto; padding:0 20px; }
+      :root {
+        --k-black: #0e0d0c;
+        --k-ink: #131210;
+        --k-panel: #17150f;
+        --k-panel-2: #1e1c15;
+        --k-bone-100: #ece7db;
+        --k-bone-200: #d6d0c4;
+        --k-bone-300: #b3ad9f;
+        --k-dim: #8a8578;
+        --k-faint: #5b574d;
+        --k-line: #322f28;
+        --k-line-2: #47433a;
+        --k-red: #bf3b26;
+        --k-red-bright: #db4a2f;
+        --k-red-ink: #2a120c;
+        --k-green: #7fa65c;
+        --k-cyan: #5b9a97;
+        --k-amber: #c8923a;
+        --font-mono:
+          "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        --font-display: "Oswald", "Arial Narrow", "Helvetica Neue", sans-serif;
+        --bw: 1px;
+        --bw-heavy: 2px;
+        --tracking-label: 0.08em;
+        --tracking-wide: 0.14em;
+        --tracking-plate: 0.22em;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--k-black);
+        color: var(--k-bone-200);
+        font-family: var(--font-mono);
+        font-size: 14px;
+        line-height: 1.6;
+        font-weight: 400;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--k-bone-100);
+        text-decoration: none;
+        border-bottom: 1px solid var(--k-line-2);
+      }
+      a:hover {
+        border-bottom-color: var(--k-bone-300);
+      }
+      ::selection {
+        background: var(--k-bone-200);
+        color: var(--k-black);
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
 
-/* Structural labels — UPPERCASE mono, the console's panel-title voice. */
-.label { font-weight:500; text-transform:uppercase; letter-spacing:var(--tracking-label);
-  color:var(--k-bone-300); font-size:12px; }
-.dim { color:var(--k-dim); }
-.faint { color:var(--k-faint); }
+      /* Structural labels — UPPERCASE mono, the console's panel-title voice. */
+      .label {
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        color: var(--k-bone-300);
+        font-size: 12px;
+      }
+      .dim {
+        color: var(--k-dim);
+      }
+      .faint {
+        color: var(--k-faint);
+      }
 
-/* Banner: identity register — the ONE place the red accent leaks in. */
-.banner { border-bottom:var(--bw) solid var(--k-line); }
-.banner .wrap { display:flex; justify-content:space-between; align-items:center;
-  padding-top:10px; padding-bottom:10px; font-size:12px; letter-spacing:var(--tracking-label);
-  text-transform:uppercase; color:var(--k-dim); flex-wrap:wrap; gap:8px; }
-.banner b { color:var(--k-red); font-weight:600; letter-spacing:var(--tracking-wide); }
-.banner nav a { border:0; color:var(--k-bone-300); margin-left:16px; }
-.banner nav a:hover { color:var(--k-bone-100); }
+      /* Banner: identity register — the ONE place the red accent leaks in. */
+      .banner {
+        border-bottom: var(--bw) solid var(--k-line);
+      }
+      .banner .wrap {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        font-size: 12px;
+        letter-spacing: var(--tracking-label);
+        text-transform: uppercase;
+        color: var(--k-dim);
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .banner b {
+        color: var(--k-red);
+        font-weight: 600;
+        letter-spacing: var(--tracking-wide);
+      }
+      .banner nav a {
+        border: 0;
+        color: var(--k-bone-300);
+        margin-left: 16px;
+      }
+      .banner nav a:hover {
+        color: var(--k-bone-100);
+      }
 
-/* Hero */
-.hero { padding:64px 0 40px; border-bottom:var(--bw) solid var(--k-line); }
-.wordmark { font-family:var(--font-display); font-weight:700; text-transform:uppercase;
-  letter-spacing:var(--tracking-plate); line-height:1; color:var(--k-bone-100);
-  font-size:clamp(56px,14vw,132px); margin:0; }
-.rule { height:var(--bw-heavy); background:var(--k-red); border:0; width:min(360px,80%);
-  margin:18px 0 22px; }
-.tagline { font-family:var(--font-display); font-weight:600; text-transform:uppercase;
-  letter-spacing:var(--tracking-wide); color:var(--k-bone-200); font-size:clamp(15px,2.4vw,20px);
-  margin:0 0 26px; }
-.pitch { font-size:clamp(15px,2vw,18px); max-width:60ch; margin:0 0 8px; color:var(--k-bone-200); }
-.subpitch { color:var(--k-dim); max-width:64ch; margin:0 0 30px; }
-.cta { display:flex; gap:12px; flex-wrap:wrap; }
-.btn { display:inline-block; font-family:var(--font-mono); font-weight:600; font-size:13px;
-  text-transform:uppercase; letter-spacing:var(--tracking-label); padding:11px 20px;
-  border:var(--bw) solid var(--k-line-2); color:var(--k-bone-100); background:transparent;
-  transition:border-color 80ms linear, background 80ms linear; }
-.btn:hover { border-color:var(--k-bone-300); }
-.btn-primary { background:var(--k-red); border-color:var(--k-red); color:var(--k-bone-100); }
-.btn-primary:hover { background:var(--k-red-bright); border-color:var(--k-red-bright); }
+      /* Hero */
+      .hero {
+        padding: 64px 0 40px;
+        border-bottom: var(--bw) solid var(--k-line);
+      }
+      .wordmark {
+        font-family: var(--font-display);
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-plate);
+        line-height: 1;
+        color: var(--k-bone-100);
+        font-size: clamp(56px, 14vw, 132px);
+        margin: 0;
+      }
+      .rule {
+        height: var(--bw-heavy);
+        background: var(--k-red);
+        border: 0;
+        width: min(360px, 80%);
+        margin: 18px 0 22px;
+      }
+      .tagline {
+        font-family: var(--font-display);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-wide);
+        color: var(--k-bone-200);
+        font-size: clamp(15px, 2.4vw, 20px);
+        margin: 0 0 26px;
+      }
+      .pitch {
+        font-size: clamp(15px, 2vw, 18px);
+        max-width: 60ch;
+        margin: 0 0 8px;
+        color: var(--k-bone-200);
+      }
+      .subpitch {
+        color: var(--k-dim);
+        max-width: 64ch;
+        margin: 0 0 30px;
+      }
+      .cta {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .btn {
+        display: inline-block;
+        font-family: var(--font-mono);
+        font-weight: 600;
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        padding: 11px 20px;
+        border: var(--bw) solid var(--k-line-2);
+        color: var(--k-bone-100);
+        background: transparent;
+        transition:
+          border-color 80ms linear,
+          background 80ms linear;
+      }
+      .btn:hover {
+        border-color: var(--k-bone-300);
+      }
+      .btn-primary {
+        background: var(--k-red);
+        border-color: var(--k-red);
+        color: var(--k-bone-100);
+      }
+      .btn-primary:hover {
+        background: var(--k-red-bright);
+        border-color: var(--k-red-bright);
+      }
 
-/* Product shot — the two-seat console. Square, hairline, flat. */
-.shot { background:var(--k-ink); border-bottom:var(--bw) solid var(--k-line); }
-.shot .frame { max-width:1100px; margin:0 auto; padding:40px 20px; }
-.shot figure { margin:0; border:var(--bw) solid var(--k-line-2); background:var(--k-black); }
-.shot img { display:block; width:100%; height:auto; }
-.shot figcaption { padding:9px 13px; border-top:var(--bw) solid var(--k-line);
-  color:var(--k-dim); font-size:11px; text-transform:uppercase; letter-spacing:var(--tracking-label); }
-.shot figcaption b { color:var(--k-bone-300); font-weight:600; }
+      /* Product shot — the two-seat console. Square, hairline, flat. */
+      .shot {
+        background: var(--k-ink);
+        border-bottom: var(--bw) solid var(--k-line);
+      }
+      .shot .frame {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 20px;
+      }
+      .shot figure {
+        margin: 0;
+        border: var(--bw) solid var(--k-line-2);
+        background: var(--k-black);
+      }
+      .shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+      .shot figcaption {
+        padding: 9px 13px;
+        border-top: var(--bw) solid var(--k-line);
+        color: var(--k-dim);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+      }
+      .shot figcaption b {
+        color: var(--k-bone-300);
+        font-weight: 600;
+      }
 
-/* Sections */
-section { padding:48px 0; border-bottom:var(--bw) solid var(--k-line); }
-h2 { font-family:var(--font-mono); font-weight:600; text-transform:uppercase;
-  letter-spacing:var(--tracking-label); font-size:14px; color:var(--k-bone-300);
-  margin:0 0 20px; }
-h2::before { content:"┌─ "; color:var(--k-line-2); }
+      /* Sections */
+      section {
+        padding: 48px 0;
+        border-bottom: var(--bw) solid var(--k-line);
+      }
+      h2 {
+        font-family: var(--font-mono);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        font-size: 14px;
+        color: var(--k-bone-300);
+        margin: 0 0 20px;
+      }
+      h2::before {
+        content: "┌─ ";
+        color: var(--k-line-2);
+      }
 
-/* The guarantee — the single loud thing on the page. */
-.guarantee { padding:36px 0; }
-.guarantee .card { border:var(--bw) solid var(--k-line-2); border-left:var(--bw-heavy) solid var(--k-red);
-  background:var(--k-panel); padding:26px 28px; }
-.guarantee p { font-size:clamp(18px,3vw,26px); line-height:1.4; margin:0; color:var(--k-bone-100);
-  font-weight:500; }
-.guarantee code { color:var(--k-red-bright); font-weight:600; }
-.guarantee .sub { font-size:14px; color:var(--k-dim); font-weight:400; margin-top:14px; }
+      /* The guarantee — the single loud thing on the page. */
+      .guarantee {
+        padding: 36px 0;
+      }
+      .guarantee .card {
+        border: var(--bw) solid var(--k-line-2);
+        border-left: var(--bw-heavy) solid var(--k-red);
+        background: var(--k-panel);
+        padding: 26px 28px;
+      }
+      .guarantee p {
+        font-size: clamp(18px, 3vw, 26px);
+        line-height: 1.4;
+        margin: 0;
+        color: var(--k-bone-100);
+        font-weight: 500;
+      }
+      .guarantee code {
+        color: var(--k-red-bright);
+        font-weight: 600;
+      }
+      .guarantee .sub {
+        font-size: 14px;
+        color: var(--k-dim);
+        font-weight: 400;
+        margin-top: 14px;
+      }
 
-/* Flow: the four gates */
-.flow { display:grid; grid-template-columns:repeat(4,1fr); gap:0;
-  border:var(--bw) solid var(--k-line); }
-.flow .step { padding:18px 16px; border-right:var(--bw) solid var(--k-line); }
-.flow .step:last-child { border-right:0; }
-.flow .n { color:var(--k-faint); font-size:12px; }
-.flow .g { color:var(--k-bone-100); font-weight:600; text-transform:uppercase;
-  letter-spacing:var(--tracking-label); font-size:14px; margin:4px 0 8px; }
-.flow .d { color:var(--k-dim); font-size:13px; line-height:1.45; }
-@media (max-width:640px){ .flow { grid-template-columns:1fr 1fr; }
-  .flow .step:nth-child(2){border-right:0;} .flow .step:nth-child(1),.flow .step:nth-child(2){border-bottom:var(--bw) solid var(--k-line);} }
+      /* Flow: the four gates */
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0;
+        border: var(--bw) solid var(--k-line);
+      }
+      .flow .step {
+        padding: 18px 16px;
+        border-right: var(--bw) solid var(--k-line);
+      }
+      .flow .step:last-child {
+        border-right: 0;
+      }
+      .flow .n {
+        color: var(--k-faint);
+        font-size: 12px;
+      }
+      .flow .g {
+        color: var(--k-bone-100);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        font-size: 14px;
+        margin: 4px 0 8px;
+      }
+      .flow .d {
+        color: var(--k-dim);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      @media (max-width: 640px) {
+        .flow {
+          grid-template-columns: 1fr 1fr;
+        }
+        .flow .step:nth-child(2) {
+          border-right: 0;
+        }
+        .flow .step:nth-child(1),
+        .flow .step:nth-child(2) {
+          border-bottom: var(--bw) solid var(--k-line);
+        }
+      }
 
-/* Mock console gate card — showcases the functional palette. */
-.console { border:var(--bw) solid var(--k-line-2); background:var(--k-ink); margin-top:22px;
-  font-size:13px; line-height:1.55; overflow-x:auto; }
-.console .bar { border-bottom:var(--bw) solid var(--k-line); padding:6px 12px; color:var(--k-dim);
-  text-transform:uppercase; letter-spacing:var(--tracking-label); font-size:11px; }
-.console .body { padding:10px 12px; white-space:pre; }
-.console .body .add { color:var(--k-green); }
-.console .body .del { color:var(--k-red-bright); }
-.console .body .hunk { color:var(--k-cyan); }
-.console .verdict { border-top:var(--bw) solid var(--k-line); padding:10px 12px; white-space:pre;
-  color:var(--k-bone-300); }
-.console .await { color:var(--k-dim); }
-.console .go { color:var(--k-green); font-weight:600; }
-.console .needs { color:var(--k-red); font-weight:600; }
+      /* Mock console gate card — showcases the functional palette. */
+      .console {
+        border: var(--bw) solid var(--k-line-2);
+        background: var(--k-ink);
+        margin-top: 22px;
+        font-size: 13px;
+        line-height: 1.55;
+        overflow-x: auto;
+      }
+      .console .bar {
+        border-bottom: var(--bw) solid var(--k-line);
+        padding: 6px 12px;
+        color: var(--k-dim);
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        font-size: 11px;
+      }
+      .console .body {
+        padding: 10px 12px;
+        white-space: pre;
+      }
+      .console .body .add {
+        color: var(--k-green);
+      }
+      .console .body .del {
+        color: var(--k-red-bright);
+      }
+      .console .body .hunk {
+        color: var(--k-cyan);
+      }
+      .console .verdict {
+        border-top: var(--bw) solid var(--k-line);
+        padding: 10px 12px;
+        white-space: pre;
+        color: var(--k-bone-300);
+      }
+      .console .await {
+        color: var(--k-dim);
+      }
+      .console .go {
+        color: var(--k-green);
+        font-weight: 600;
+      }
+      .console .needs {
+        color: var(--k-red);
+        font-weight: 600;
+      }
 
-/* Install */
-pre.code { background:var(--k-panel); border:var(--bw) solid var(--k-line);
-  padding:16px 18px; overflow-x:auto; color:var(--k-bone-200); font-size:13px; line-height:1.7; margin:0 0 16px; }
-pre.code .c { color:var(--k-dim); }
-pre.code .p { color:var(--k-red); }        /* prompt sigil */
-.note { color:var(--k-dim); font-size:13px; max-width:66ch; }
+      /* Install */
+      pre.code {
+        background: var(--k-panel);
+        border: var(--bw) solid var(--k-line);
+        padding: 16px 18px;
+        overflow-x: auto;
+        color: var(--k-bone-200);
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 0 0 16px;
+      }
+      pre.code .c {
+        color: var(--k-dim);
+      }
+      pre.code .p {
+        color: var(--k-red);
+      } /* prompt sigil */
+      .note {
+        color: var(--k-dim);
+        font-size: 13px;
+        max-width: 66ch;
+      }
 
-/* Principles */
-.principles { list-style:none; margin:0; padding:0; display:grid;
-  grid-template-columns:1fr 1fr; gap:1px; background:var(--k-line); border:var(--bw) solid var(--k-line); }
-.principles li { background:var(--k-black); padding:16px 18px; }
-.principles b { display:block; color:var(--k-bone-100); font-weight:600; margin-bottom:5px;
-  text-transform:uppercase; letter-spacing:var(--tracking-label); font-size:12px; }
-.principles span { color:var(--k-dim); font-size:13px; line-height:1.5; }
-.principles .mk { color:var(--k-red); }
-@media (max-width:640px){ .principles { grid-template-columns:1fr; } }
+      /* Principles */
+      .principles {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1px;
+        background: var(--k-line);
+        border: var(--bw) solid var(--k-line);
+      }
+      .principles li {
+        background: var(--k-black);
+        padding: 16px 18px;
+      }
+      .principles b {
+        display: block;
+        color: var(--k-bone-100);
+        font-weight: 600;
+        margin-bottom: 5px;
+        text-transform: uppercase;
+        letter-spacing: var(--tracking-label);
+        font-size: 12px;
+      }
+      .principles span {
+        color: var(--k-dim);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .principles .mk {
+        color: var(--k-red);
+      }
+      @media (max-width: 640px) {
+        .principles {
+          grid-template-columns: 1fr;
+        }
+      }
 
-/* Footer / provenance */
-footer { padding:34px 0 60px; }
-footer .prov { color:var(--k-faint); font-size:12px; letter-spacing:var(--tracking-label);
-  text-transform:uppercase; }
-footer .prov a { color:var(--k-dim); border:0; }
-footer .prov a:hover { color:var(--k-bone-200); }
-</style>
-</head>
-<body>
+      /* Footer / provenance */
+      footer {
+        padding: 34px 0 60px;
+      }
+      footer .prov {
+        color: var(--k-faint);
+        font-size: 12px;
+        letter-spacing: var(--tracking-label);
+        text-transform: uppercase;
+      }
+      footer .prov a {
+        color: var(--k-dim);
+        border: 0;
+      }
+      footer .prov a:hover {
+        color: var(--k-bone-200);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="banner">
+      <div class="wrap">
+        <span
+          >[ <b>КОНТУР</b> &nbsp;//&nbsp; co-op supervisor &nbsp;//&nbsp; v0.2.0
+          ]</span
+        >
+        <nav>
+          <a href="#guarantee">guarantee</a>
+          <a href="#how">how</a>
+          <a href="#install">install</a>
+          <a href="https://github.com/industrial-assets/kontur">github</a>
+        </nav>
+      </div>
+    </div>
 
-<div class="banner"><div class="wrap">
-  <span>[ <b>КОНТУР</b> &nbsp;//&nbsp; co-op supervisor &nbsp;//&nbsp; v0.2.0 ]</span>
-  <nav>
-    <a href="#guarantee">guarantee</a>
-    <a href="#how">how</a>
-    <a href="#install">install</a>
-    <a href="https://github.com/industrial-assets/kontur">github</a>
-  </nav>
-</div></div>
+    <header class="hero">
+      <div class="wrap">
+        <h1 class="wordmark">KONTUR</h1>
+        <hr class="rule" />
+        <p class="tagline">code with clarity. ship with confidence.</p>
+        <p class="tagline">
+          A brutalist CLI for high-efficiency agentic pair programming.
+        </p>
+        <p class="pitch">
+          Two engineers, one console, a fleet of agents — and nothing ships
+          without both keys.
+        </p>
+        <div class="cta">
+          <a class="btn btn-primary" href="#install">install</a>
+          <a class="btn" href="https://github.com/industrial-assets/kontur"
+            >source →</a
+          >
+        </div>
+      </div>
+    </header>
 
-<header class="hero"><div class="wrap">
-  <h1 class="wordmark">KONTUR</h1>
-  <hr class="rule">
-  <p class="tagline">code with clarity. ship with confidence.</p>
-  <p class="pitch">A brutalist CLI for high-efficiency agentic pair programming.</p>
-  <p class="subpitch">Two engineers, one console, a fleet of agents — and nothing ships without both keys.</p>
-  <div class="cta">
-    <a class="btn btn-primary" href="#install">install</a>
-    <a class="btn" href="https://github.com/industrial-assets/kontur">source →</a>
-  </div>
-</div></header>
+    <section class="shot">
+      <div class="frame">
+        <figure>
+          <img
+            src="assets/screenshot.png"
+            width="6400"
+            height="3600"
+            loading="lazy"
+            alt="Two KONTUR consoles side by side — Operator A [Host] and Operator B — each showing the fleet, activity log, and a diff under review at a gate."
+          />
+          <figcaption>
+            ▸ <b>two seats · one console</b> — host and operator, co-signing the
+            same fleet
+          </figcaption>
+        </figure>
+      </div>
+    </section>
 
-<section class="shot"><div class="frame">
-  <figure>
-    <img src="assets/screenshot.png" width="6400" height="3600" loading="lazy"
-      alt="Two KONTUR consoles side by side — Operator A [Host] and Operator B — each showing the fleet, activity log, and a diff under review at a gate.">
-    <figcaption>▸ <b>two seats · one console</b> — host and operator, co-signing the same fleet</figcaption>
-  </figure>
-</div></section>
+    <section id="guarantee" class="guarantee">
+      <div class="wrap">
+        <div class="card">
+          <p>
+            Nothing an agent writes reaches <code>main</code> without two
+            independent human approvals.
+          </p>
+          <p class="sub">
+            Two distinct operator keys. Independence enforced when a verdict is
+            cast, not just when it's shown. On high-risk gates the first verdict
+            is sealed — no anchoring, no rubber-stamp.
+          </p>
+        </div>
+      </div>
+    </section>
 
-<section id="guarantee" class="guarantee"><div class="wrap">
-  <div class="card">
-    <p>Nothing an agent writes reaches <code>main</code> without two independent human approvals.</p>
-    <p class="sub">Two distinct operator keys. Independence enforced when a verdict is cast, not just when it's shown. On high-risk gates the first verdict is sealed — no anchoring, no rubber-stamp.</p>
-  </div>
-</div></section>
+    <section>
+      <div class="wrap">
+        <h2>what it is</h2>
+        <p class="pitch" style="max-width: 70ch">
+          KONTUR (kohn-toor) is a terminal-native workstation where two
+          engineers jointly supervise a fleet of coding agents on the same
+          codebase. One hosts the agents, one joins to co-sign; both review as
+          co-equal checkers. Every change an agent makes is gated behind two
+          independent human approvals before it can merge — and the whole
+          session leaves a signed, tamper-evident audit trail.
+        </p>
+        <p class="subpitch" style="max-width: 70ch">
+          It exists for the place solo agentic tooling can't go: production
+          environments where
+          <em>the agent wrote it and one person glanced at it</em> isn't good
+          enough, and segregation of duties is the rule, not a nicety.
+        </p>
+      </div>
+    </section>
 
-<section><div class="wrap">
-  <h2>what it is</h2>
-  <p class="pitch" style="max-width:70ch">KONTUR (kohn-toor) is a terminal-native workstation where two engineers jointly supervise a fleet of coding agents on the same codebase. One hosts the agents, one joins to co-sign; both review as co-equal checkers. Every change an agent makes is gated behind two independent human approvals before it can merge — and the whole session leaves a signed, tamper-evident audit trail.</p>
-  <p class="subpitch" style="max-width:70ch">It exists for the place solo agentic tooling can't go: production environments where <em>the agent wrote it and one person glanced at it</em> isn't good enough, and segregation of duties is the rule, not a nicety.</p>
-</div></section>
+    <section id="how">
+      <div class="wrap">
+        <h2>how it works — four gates</h2>
+        <div class="flow">
+          <div class="step">
+            <div class="n">01</div>
+            <div class="g">dispatch</div>
+            <div class="d">
+              both seats compose the prompt in-console; every edit resets
+              consent. Both mark ready to dispatch.
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">02</div>
+            <div class="g">plan</div>
+            <div class="d">
+              the agent proposes a task list of bounded, single-concern changes
+              and blocks until both approve.
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">03</div>
+            <div class="g">gate</div>
+            <div class="d">
+              each finished change parks at a dual-hold. First key sealed,
+              second cast blind. A no-go carries its fix.
+            </div>
+          </div>
+          <div class="step">
+            <div class="n">04</div>
+            <div class="g">merge</div>
+            <div class="d">
+              the approved set lands as one reviewed commit with Reviewed-by
+              trailers and a hash-chained audit head.
+            </div>
+          </div>
+        </div>
 
-<section id="how"><div class="wrap">
-  <h2>how it works — four gates</h2>
-  <div class="flow">
-    <div class="step"><div class="n">01</div><div class="g">dispatch</div><div class="d">both seats compose the prompt in-console; every edit resets consent. Both mark ready to dispatch.</div></div>
-    <div class="step"><div class="n">02</div><div class="g">plan</div><div class="d">the agent proposes a task list of bounded, single-concern changes and blocks until both approve.</div></div>
-    <div class="step"><div class="n">03</div><div class="g">gate</div><div class="d">each finished change parks at a dual-hold. First key sealed, second cast blind. A no-go carries its fix.</div></div>
-    <div class="step"><div class="n">04</div><div class="g">merge</div><div class="d">the approved set lands as one reviewed commit with Reviewed-by trailers and a hash-chained audit head.</div></div>
-  </div>
+        <div class="console" aria-label="mock KONTUR gate card">
+          <div class="bar">┌─ diff — gate-03 — auth/session.rs</div>
+          <div class="body">
+            @@ <span class="hunk">-18,7 +18,9 @@ fn open_session()</span>
+            let ttl = cfg.session_ttl();
+            <span class="del">- let token = mint(user);</span>
+            <span class="add">+ let token = mint_scoped(user, ttl);</span>
+            <span class="add">+ audit.record(&token);</span>
+            store.put(user, token);
+          </div>
+          <div class="verdict">
+            KEY A you <span class="needs">□ awaiting your verdict</span> KEY B
+            j.reed ■ cast — sealed ▶ NEEDS SIGN-OFF · [g] go [r] no-go+steer [e]
+            hand-edit
+          </div>
+        </div>
+      </div>
+    </section>
 
-  <div class="console" aria-label="mock KONTUR gate card">
-    <div class="bar">┌─ diff — gate-03 — auth/session.rs</div>
-<div class="body">@@ <span class="hunk">-18,7 +18,9 @@ fn open_session()</span>
-   let ttl = cfg.session_ttl();
-<span class="del">-  let token = mint(user);</span>
-<span class="add">+  let token = mint_scoped(user, ttl);</span>
-<span class="add">+  audit.record(&token);</span>
-   store.put(user, token);</div>
-    <div class="verdict">   KEY A  you       <span class="needs">□ awaiting your verdict</span>
-   KEY B  j.reed    ■ cast — sealed
-   ▶ NEEDS SIGN-OFF   ·   [g] go   [r] no-go+steer   [e] hand-edit</div>
-  </div>
-</div></section>
-
-<section id="install"><div class="wrap">
-  <h2>install</h2>
-  <p class="note" style="margin-bottom:14px">Distributed as a Homebrew tap (macOS + Linux):</p>
-<pre class="code"><span class="p">$</span> brew tap industrial-assets/kontur
+    <section id="install">
+      <div class="wrap">
+        <h2>install</h2>
+        <p class="note" style="margin-bottom: 14px">
+          Distributed as a Homebrew tap (macOS + Linux):
+        </p>
+        <pre
+          class="code"
+        ><span class="p">$</span> brew tap industrial-assets/kontur
 <span class="p">$</span> brew trust industrial-assets/kontur   <span class="c"># once: recent Homebrew requires trusting third-party taps</span>
 <span class="p">$</span> brew install kontur</pre>
-  <p class="note" style="margin-bottom:14px">Upgrade when a new version ships — <code>brew upgrade kontur</code>. Or build from source:</p>
-<pre class="code"><span class="p">$</span> git clone https://github.com/industrial-assets/kontur
+        <p class="note" style="margin-bottom: 14px">
+          Upgrade when a new version ships — <code>brew upgrade kontur</code>.
+          Or build from source:
+        </p>
+        <pre
+          class="code"
+        ><span class="p">$</span> git clone https://github.com/industrial-assets/kontur
 <span class="p">$</span> cd kontur
 <span class="p">$</span> cargo install --path crates/kontur-tui --bin kontur</pre>
-  <p class="note">Then <code>cd your-project &amp;&amp; kontur</code> to host, and <code>kontur join kontur://…</code> to co-sign. A fresh folder works too — Kontur offers to <code>git init</code> and makes a base commit.</p>
-</div></section>
+        <p class="note">
+          Then <code>cd your-project &amp;&amp; kontur</code> to host, and
+          <code>kontur join kontur://…</code> to co-sign. A fresh folder works
+          too — Kontur offers to <code>git init</code> and makes a base commit.
+        </p>
+      </div>
+    </section>
 
-<section><div class="wrap">
-  <h2>design principles</h2>
-  <ul class="principles">
-    <li><b>Every element is decision-relevant</b><span>If an operator doesn't read it to decide or act, it isn't on screen. No telemetry, no confidence scores, no ornament.</span></li>
-    <li><b>Emphasis is spent once</b><span>The single thing that needs a human is loud; everything else is calm. A screen where three things shout is a screen where nothing does.</span></li>
-    <li><b>Calm is the default</b><span>The authentic control-room principle is reducing alarm noise, not manufacturing it. Kontur is quiet until it needs you.</span></li>
-    <li><b>Keyboard-first</b><span>Every action has a key, shown inline. The command line at the bottom is always live. No hidden verbs.</span></li>
-    <li><b>The look is a consequence, not a costume</b><span>Density and monospace fall out of supervising many things at once. The <span class="mk">Cyrillic/red</span> flourish stays in the identity register.</span></li>
-    <li><b>Two operators, one truth</b><span>Both see the same authoritative fleet state — except where independence requires divergence: the blind sign-off.</span></li>
-  </ul>
-</div></section>
+    <section>
+      <div class="wrap">
+        <h2>design principles</h2>
+        <ul class="principles">
+          <li>
+            <b>Every element is decision-relevant</b
+            ><span
+              >If an operator doesn't read it to decide or act, it isn't on
+              screen. No telemetry, no confidence scores, no ornament.</span
+            >
+          </li>
+          <li>
+            <b>Emphasis is spent once</b
+            ><span
+              >The single thing that needs a human is loud; everything else is
+              calm. A screen where three things shout is a screen where nothing
+              does.</span
+            >
+          </li>
+          <li>
+            <b>Calm is the default</b
+            ><span
+              >The authentic control-room principle is reducing alarm noise, not
+              manufacturing it. Kontur is quiet until it needs you.</span
+            >
+          </li>
+          <li>
+            <b>Keyboard-first</b
+            ><span
+              >Every action has a key, shown inline. The command line at the
+              bottom is always live. No hidden verbs.</span
+            >
+          </li>
+          <li>
+            <b>The look is a consequence, not a costume</b
+            ><span
+              >Density and monospace fall out of supervising many things at
+              once. The <span class="mk">Cyrillic/red</span> flourish stays in
+              the identity register.</span
+            >
+          </li>
+          <li>
+            <b>Two operators, one truth</b
+            ><span
+              >Both see the same authoritative fleet state — except where
+              independence requires divergence: the blind sign-off.</span
+            >
+          </li>
+        </ul>
+      </div>
+    </section>
 
-<footer><div class="wrap">
-  <p class="prov">© 2026 Industrial Assets · open source · no warranty · <a href="https://github.com/industrial-assets/kontur">github.com/industrial-assets/kontur</a></p>
-</div></footer>
-
-</body>
+    <footer>
+      <div class="wrap">
+        <p class="prov">
+          © 2026 Industrial Assets · open source · no warranty ·
+          <a href="https://github.com/industrial-assets/kontur"
+            >github.com/industrial-assets/kontur</a
+          >
+        </p>
+      </div>
+    </footer>
+  </body>
 </html>
